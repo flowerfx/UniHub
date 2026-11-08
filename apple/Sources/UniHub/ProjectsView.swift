@@ -11,6 +11,13 @@ struct ProjectsView: View {
     @AppStorage("detailsProject") private var savedDetailsPath = ""
     @State private var didOpenLaunchCleanup = false
 
+    private var removalTitle: String {
+        let pending = model.projectsPendingRemoval
+        return pending.count == 1
+            ? "Remove \(pending[0].title) from the list?"
+            : "Remove \(pending.count) projects from the list?"
+    }
+
     private var rows: [Project] {
         let query = search.trimmingCharacters(in: .whitespaces)
         let filtered = query.isEmpty
@@ -106,24 +113,32 @@ struct ProjectsView: View {
         .contextMenu(forSelectionType: Project.ID.self) { ids in
             if let project = model.projects.first(where: { ids.contains($0.id) }), ids.count == 1 {
                 ProjectMenu(model: model, project: project)
+            } else if ids.count > 1 {
+                Button("Remove \(ids.count) Projects from List…", role: .destructive) {
+                    model.requestRemoval(of: model.projects.filter { ids.contains($0.id) })
+                }
             }
         } primaryAction: { ids in
             for project in model.projects where ids.contains(project.id) {
                 Task { await model.open(project) }
             }
         }
+        // Delete key / Edit → Delete: remove the selected projects from the list.
+        .onDeleteCommand {
+            model.requestRemoval(of: model.projects.filter { selection.contains($0.id) })
+        }
         .searchable(text: $search, prompt: "Search projects")
         .confirmationDialog(
-            "Remove \(model.projectPendingRemoval?.title ?? "") from the list?",
+            removalTitle,
             isPresented: Binding(
-                get: { model.projectPendingRemoval != nil },
-                set: { if !$0 { model.projectPendingRemoval = nil } }
+                get: { !model.projectsPendingRemoval.isEmpty },
+                set: { if !$0 { model.projectsPendingRemoval = [] } }
             ),
-            presenting: model.projectPendingRemoval
-        ) { project in
-            Button("Remove", role: .destructive) { Task { await model.remove(project) } }
-        } message: { _ in
-            Text("The project folder stays on disk.")
+            presenting: model.projectsPendingRemoval
+        ) { projects in
+            Button("Remove", role: .destructive) { Task { await model.remove(projects) } }
+        } message: { projects in
+            Text(projects.count == 1 ? "The project folder stays on disk." : "The project folders stay on disk.")
         }
         .navigationTitle("Projects")
         .navigationSubtitle("\(model.projects.count) projects")
@@ -184,6 +199,10 @@ private struct EditorVersionCell: View {
                         .help("Unity \(version) is not installed")
                 }
             }
+        } else if project.accessDenied {
+            Label("No access", systemImage: "lock.fill")
+                .foregroundStyle(.orange)
+                .help("macOS does not let UniHub read this folder. Allow it in System Settings → Privacy & Security → Files and Folders.")
         } else {
             Text("—").foregroundStyle(.secondary)
         }

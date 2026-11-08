@@ -72,7 +72,8 @@ final class AppModel {
     var updateError: String?
 
     var isAddingProject = false
-    var projectPendingRemoval: Project?
+    /// Projects waiting for the "Remove from the list?" confirmation.
+    var projectsPendingRemoval: [Project] = []
     var errorMessage: String?
 
     private let unihub: UniHub?
@@ -123,19 +124,28 @@ final class AppModel {
         }
     }
 
-    /// Removes now, or asks first when the setting says so.
-    func requestRemoval(of project: Project) {
+    /// Removes from the list now, or asks first when the setting says so.
+    func requestRemoval(of projects: [Project]) {
+        guard !projects.isEmpty else { return }
         if settings.askBeforeRemovingProject {
-            projectPendingRemoval = project
+            projectsPendingRemoval = projects
         } else {
-            Task { await remove(project) }
+            Task { await remove(projects) }
         }
     }
 
-    func remove(_ project: Project) async {
-        if await perform({ try $0.removeProject(path: project.path) }) {
-            await refreshLocal()
+    func requestRemoval(of project: Project) {
+        requestRemoval(of: [project])
+    }
+
+    /// Removes projects from the list; their folders stay on disk.
+    func remove(_ projects: [Project]) async {
+        let paths = projects.map(\.path)
+        _ = await perform { core in
+            for path in paths { try core.removeProject(path: path) }
         }
+        if let path = detailsPath, paths.contains(path) { showDetails = false }
+        await refreshLocal()
     }
 
     func toggleFavorite(_ project: Project) async {
