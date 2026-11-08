@@ -43,26 +43,33 @@ struct MenuBarMenu: View {
             Divider()
             CheckForUpdatesButton(model: model)
         }
-        Button("Open UniHub") { showMainWindow(openWindow) }
+        Button("Open UniHub") { MainWindow.show(openWindow) }
         Button("Quit UniHub") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 }
 
-/// Brings the main window to the front, or opens it when it was closed.
+/// Brings the main window to the front, or opens it when it was closed. Works from AppKit
+/// code too (the Dock icon), using SwiftUI's open action kept from a view.
 @MainActor
-func showMainWindow(_ openWindow: OpenWindowAction) {
-    let windows = NSApp.windows.filter { window in
-        !(window is NSPanel)
-            && window.identifier?.rawValue.hasPrefix(MenuBarMenu.mainWindowID) == true
+enum MainWindow {
+    /// Set when the main window or the menu bar menu first appears.
+    static var openAction: OpenWindowAction?
+
+    static func show(_ openWindow: OpenWindowAction? = nil) {
+        if let openWindow { openAction = openWindow }
+        let existing = NSApp.windows.first { window in
+            !(window is NSPanel)
+                && window.identifier?.rawValue.hasPrefix(MenuBarMenu.mainWindowID) == true
+        }
+        if let window = existing {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openAction?(id: MenuBarMenu.mainWindowID)
+        }
+        NSApp.activate()
     }
-    if let window = windows.first {
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
-    } else {
-        openWindow(id: MenuBarMenu.mainWindowID)
-    }
-    NSApp.activate()
 }
 
 /// "Check for Updates…" (app menu and menu bar): the result shows on the main window, so
@@ -73,7 +80,7 @@ struct CheckForUpdatesButton: View {
 
     var body: some View {
         Button("Check for Updates…") {
-            showMainWindow(openWindow)
+            MainWindow.show(openWindow)
             Task { await model.checkForUpdate(manual: true) }
         }
         .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)

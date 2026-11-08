@@ -57,6 +57,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
     }
 
+    /// The Dock icon brings the main window back, also when it was closed and only the menu
+    /// bar icon is left: SwiftUI counts that icon as a visible window and would do nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainWindow.show()
+        return false
+    }
+
     /// With the menu bar icon, closing the window keeps UniHub running there.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !(UserDefaults.standard.object(forKey: MenuBarMenu.showKey) as? Bool ?? true)

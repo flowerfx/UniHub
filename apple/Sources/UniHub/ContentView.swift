@@ -22,6 +22,7 @@ enum Page: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     /// Remembered between launches. `-page tools` on the command line overrides it.
     @AppStorage("page") private var page: Page = .projects
 
@@ -46,6 +47,8 @@ struct ContentView: View {
             }
         }
         .background(TitlebarBrand())
+        // Lets the Dock icon reopen this window after it was closed.
+        .onAppear { MainWindow.openAction = openWindow }
         .sheet(item: $model.cleanup) { _ in CleanupView(model: model) }
         .sheet(item: $model.availableUpdate) { update in UpdateSheet(model: model, update: update) }
         .alert(
