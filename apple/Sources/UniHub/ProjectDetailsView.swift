@@ -14,7 +14,7 @@ struct ProjectDetailsView: View {
                 Form {
                     HeaderSection(model: model, project: project)
                     ProjectSection(model: model, project: project, details: model.details)
-                    SizeSection(model: model)
+                    SizeSection(model: model, project: project)
                     SourceControlSection(model: model, project: project, details: model.details)
                     if let details = model.details, details.cloudProjectId != nil || details.organization != nil {
                         CloudSection(model: model, details: details)
@@ -128,9 +128,10 @@ private struct ProjectSection: View {
 
 private struct SizeSection: View {
     let model: AppModel
+    let project: Project
 
     var body: some View {
-        Section("Size on disk") {
+        Section {
             if let size = model.detailsSize {
                 LabeledContent("Total") {
                     Text(Format.bytes(size.total)).fontWeight(.semibold)
@@ -147,6 +148,15 @@ private struct SizeSection: View {
                 HStack { ProgressView().controlSize(.small); Text("Measuring…").foregroundStyle(.secondary) }
             } else {
                 Text("Unavailable").foregroundStyle(.secondary)
+            }
+        } header: {
+            HStack {
+                Text("Size on disk")
+                Spacer()
+                Button("Clean Up…") { model.requestCleanup(of: project) }
+                    .controlSize(.small)
+                    .disabled(!project.exists)
+                    .help("Free disk space: remove Library, Temp, Logs, generated .sln/.csproj files…")
             }
         }
     }

@@ -11,6 +11,25 @@ extension Editor: Identifiable {
 
 extension Release: Identifiable {
     public var id: String { version }
+
+    /// Unity's name for the release line: "Unity 6.3 LTS", "Unity 6.6", "Unity 2022.3 LTS".
+    var lineName: String {
+        let parts = version.split(separator: ".")
+        guard parts.count >= 2, let major = Int(parts[0]) else { return "Unity \(version)" }
+        let name = "Unity \(major >= 6000 ? major / 1000 : major).\(parts[1])"
+        return stream == "LTS" ? name + " LTS" : name
+    }
+
+    /// "Unity 6", "Unity 2022".
+    var majorName: String {
+        let major = Int(version.split(separator: ".").first ?? "") ?? 0
+        return "Unity \(major >= 6000 ? major / 1000 : major)"
+    }
+
+    /// "LTS", "Supported", "Beta", …
+    var streamName: String {
+        stream == "LTS" ? "LTS" : stream.capitalized
+    }
 }
 
 /// Sort key that orders Unity versions numerically (`6000.0.9f1` < `6000.0.85f1`).
@@ -75,7 +94,32 @@ extension UniHubError {
         case .CliNotInstalled: "This needs the Unity CLI. Install it from the Tools page."
         case .CliFailed(let code, let message):
             code == "AUTH_ERROR" ? "You are not signed in, or your session expired.\n\(message)" : message
+        case .ProjectInUse: "This project is open in Unity. Close it in Unity first."
         case .Cancelled: "Cancelled."
+        }
+    }
+}
+
+extension CleanKind {
+    var title: String {
+        switch self {
+        case .cache: "Unity cache"
+        case .logs: "Logs and crash dumps"
+        case .ideFiles: "IDE and solution files"
+        case .debugFiles: "Debug symbols"
+        case .systemFiles: "Finder files"
+        case .other: "Not regenerated"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .cache: "shippingbox"
+        case .logs: "doc.text"
+        case .ideFiles: "chevron.left.forwardslash.chevron.right"
+        case .debugFiles: "ladybug"
+        case .systemFiles: "macwindow"
+        case .other: "exclamationmark.triangle"
         }
     }
 }

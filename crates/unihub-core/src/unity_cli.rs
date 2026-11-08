@@ -148,7 +148,7 @@ struct EnvelopeError {
     message: String,
 }
 
-fn base_command(cli: &Path) -> Command {
+pub(crate) fn base_command(cli: &Path) -> Command {
     let mut cmd = Command::new(cli);
     cmd.env("UNITY_NO_BANNER", "1")
         .env("UNITY_NO_PAGER", "1")
@@ -169,8 +169,10 @@ pub fn run_json(cli: &Path, args: &[&str]) -> Result<Value> {
 }
 
 pub(crate) fn parse_output(stdout: &[u8], stderr: &[u8], exit: Option<i32>) -> Result<Value> {
-    // The CLI prints one JSON document; anything after it (progress noise) is ignored.
-    let envelope = serde_json::Deserializer::from_slice(stdout).into_iter::<Envelope>().next();
+    // The CLI prints one JSON document; anything after it (progress noise) is ignored, and
+    // so are plain-text notes before it ("Adding module … as dependency of …").
+    let start = json_start(stdout);
+    let envelope = serde_json::Deserializer::from_slice(&stdout[start..]).into_iter::<Envelope>().next();
     match envelope {
         Some(Ok(env)) if env.success => Ok(env.data.unwrap_or(Value::Null)),
         Some(Ok(env)) => {
@@ -191,6 +193,18 @@ pub(crate) fn parse_output(stdout: &[u8], stderr: &[u8], exit: Option<i32>) -> R
     }
 }
 
+/// Offset of the first line that starts with `{` (0 if none).
+fn json_start(stdout: &[u8]) -> usize {
+    let mut offset = 0;
+    for line in stdout.split_inclusive(|b| *b == b'\n') {
+        if line.first() == Some(&b'{') {
+            return offset;
+        }
+        offset += line.len();
+    }
+    0
+}
+
 fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
 }
@@ -200,6 +214,13 @@ fn bool_field(v: &Value, key: &str) -> bool {
 }
 
 // ---- Typed commands -------------------------------------------------------------
+
+/// Where the CLI installs editors by default (shared with Unity Hub), e.g.
+/// `/Applications/Unity/Hub/Editor`.
+pub fn install_path(cli: &Path) -> Option<String> {
+    let data = run_json(cli, &["install-path"]).ok()?;
+    str_field(&data, "path").map(|p| p.trim_end_matches('/').to_string())
+}
 
 pub fn auth_status(cli: &Path) -> Result<AuthStatus> {
     match run_json(cli, &["auth", "status"]) {
@@ -365,7 +386,7 @@ impl SignIn {
     }
 }
 
-fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+pub(crate) fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(mut pipe) = pipe {

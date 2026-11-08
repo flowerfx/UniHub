@@ -93,6 +93,11 @@ struct GitDirs {
     common_dir: PathBuf,
 }
 
+/// The working tree that contains `project`, if any (reads `.git` only).
+pub(crate) fn git_root(project: &Path) -> Option<PathBuf> {
+    find_git(project).map(|d| d.root)
+}
+
 fn find_git(project: &Path) -> Option<GitDirs> {
     for dir in project.ancestors() {
         let dot_git = dir.join(".git");

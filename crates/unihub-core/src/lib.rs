@@ -6,9 +6,12 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod clean;
 pub mod details;
 pub mod editors;
 mod error;
+pub mod jobs;
+pub mod modules;
 mod paths;
 pub mod projects;
 pub mod releases;
@@ -22,12 +25,14 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use clean::{CleanItem, CleanKind, CleanMethod, CleanPlan, CleanResult};
 pub use details::{FolderSize, ProjectDetails, ProjectSize};
 pub use editors::Editor;
 pub use error::{Result, UniHubError};
 pub use paths::UniHubPaths;
 pub use projects::Project;
-pub use releases::{Download, Module, Release, ReleasePage, ReleaseStream};
+pub use jobs::{Job, JobKind, JobState};
+pub use releases::{Download, LicenseTerms, Module, ModuleKind, Release, ReleasePage, ReleaseStream};
 pub use settings::{Appearance, CliChannel, Settings};
 pub use unity_cli::{Account, AuthStatus, CliInfo, CliUpdate, License, LicenseStatus, Plugin};
 pub use vcs::{GitStatus, SourceControl, VcsProvider};
@@ -47,6 +52,8 @@ pub struct UniHub {
     /// Last CLI found by `unity_cli()`. Finding it runs the binary (~1 s), so the
     /// account and tool calls reuse this.
     cli: Mutex<Option<CliInfo>>,
+    /// Editor and module installs running in the background.
+    jobs: jobs::JobRunner,
 }
 
 #[uniffi::export]
@@ -79,6 +86,7 @@ impl UniHub {
             http,
             sign_in: unity_cli::SignIn::default(),
             cli: Mutex::new(None),
+            jobs: jobs::JobRunner::default(),
         }))
     }
 
@@ -139,6 +147,21 @@ impl UniHub {
         Ok(details::size(Path::new(&path), self.cli_path().ok().as_deref()))
     }
 
+    /// What "Clean Up" would remove: git-ignored files in a git repository, otherwise
+    /// the generated folders and files at the project root. Measures every item, so call
+    /// it off the main thread.
+    pub fn clean_plan(&self, path: String) -> Result<CleanPlan> {
+        self.existing_project(&path)?;
+        Ok(clean::plan(Path::new(&path)))
+    }
+
+    /// Deletes the given items of `clean_plan` for good. Refused while the project is
+    /// open in Unity; paths that are not clean-up candidates are skipped and reported.
+    pub fn clean_project(&self, path: String, items: Vec<String>) -> Result<CleanResult> {
+        self.existing_project(&path)?;
+        clean::clean(Path::new(&path), &items)
+    }
+
     /// Adds projects from the official Hub that UniHub does not list yet.
     pub fn import_from_hub(&self) -> Result<u32> {
         match self.paths.hub_data_dir() {
@@ -194,7 +217,154 @@ impl UniHub {
         offset: u32,
         version_prefix: Option<String>,
     ) -> Result<ReleasePage> {
-        releases::fetch(&self.http, stream, limit, offset, version_prefix.as_deref())
+        releases::fetch(&self.http, Some(stream), limit, offset, version_prefix.as_deref())
+    }
+
+    /// The newest release of each line Unity still supports (Supported and LTS), newest
+    /// first: the Hub's "Official releases". One is flagged `recommended`.
+    pub fn recommended_releases(&self) -> Result<Vec<Release>> {
+        releases::recommended(&self.http)
+    }
+
+    /// Searches every stream for versions starting with `query` (`2022.3`, `2019.4.4`).
+    /// Finds releases without an Apple Silicon build too (their Intel build).
+    pub fn search_releases(&self, query: String, limit: u32, offset: u32) -> Result<ReleasePage> {
+        releases::fetch(&self.http, None, limit, offset, Some(&query))
+    }
+
+    // ---- Installing editors and modules (through the Unity CLI) ---------------------
+
+    /// Installs an editor with the given modules in the background and returns the job
+    /// id. `modules` are module ids to install with it (children the user kept ticked
+    /// included; hidden dependencies are added by the CLI). `accept_terms` must be true
+    /// only after the user accepted the license terms of those modules.
+    pub fn install_editor(
+        &self,
+        version: String,
+        architecture: String,
+        modules: Vec<String>,
+        accept_terms: bool,
+    ) -> Result<u64> {
+        if self.list_editors().iter().any(|e| e.version == version && e.architecture == architecture) {
+            return Err(UniHubError::InvalidData { message: format!("Unity {version} is already installed") });
+        }
+        if self.jobs.is_running(&version, &architecture) {
+            return Err(UniHubError::InvalidData { message: format!("Unity {version} is already being installed") });
+        }
+        let cli = self.cli_path()?;
+        let mut args = vec!["install".to_string(), version.clone(), "--no-child-modules".into()];
+        args.extend(cli_architecture(&architecture));
+        if accept_terms {
+            args.push("--accept-eula".into());
+        }
+        // The CLI installs into its (and the Hub's) install path unless told otherwise.
+        let root = self.editor_install_dir();
+        if unity_cli::install_path(&cli).as_deref() != Some(root.as_str()) {
+            args.extend(["--download-directory".into(), root]);
+        }
+        if !modules.is_empty() {
+            args.push("--module".into());
+            args.extend(modules.iter().cloned());
+        }
+        self.jobs.start(&cli, args, JobKind::InstallEditor, &version, &architecture, modules)
+    }
+
+    /// Every module of an installed editor, installed or not. Editors without
+    /// `modules.json` get the release's catalogue from Unity's API, with the modules
+    /// found on disk marked installed.
+    pub fn editor_modules(&self, version: String, architecture: String) -> Result<Vec<Module>> {
+        let editor = self.find_editor(&version, &architecture)?;
+        if modules::has_catalog(Path::new(&editor.install_dir)) {
+            return Ok(editor.modules);
+        }
+        match releases::find(&self.http, &version)? {
+            Some(release) => {
+                let mut list = release.modules;
+                modules::merge_installed(&mut list, &editor.modules);
+                Ok(list)
+            }
+            None => Ok(editor.modules),
+        }
+    }
+
+    /// Adds modules to an installed editor in the background; returns the job id.
+    /// `accept_terms`: as for `install_editor`.
+    pub fn install_modules(
+        &self,
+        version: String,
+        architecture: String,
+        modules: Vec<String>,
+        accept_terms: bool,
+    ) -> Result<u64> {
+        if modules.is_empty() {
+            return Err(UniHubError::InvalidData { message: "no modules selected".into() });
+        }
+        let editor = self.find_editor(&version, &architecture)?;
+        let cli = self.cli_path()?;
+        let mut args =
+            vec!["install-modules".to_string(), "--editor-version".into(), version.clone(), "--no-child-modules".into()];
+        args.extend(cli_architecture(&editor.architecture));
+        if accept_terms {
+            args.push("--accept-eula".into());
+        }
+        // Editors outside the CLI's install path: point it at their root folder.
+        let root = Path::new(&editor.install_dir).parent().map(paths::path_string).unwrap_or_default();
+        if unity_cli::install_path(&cli).as_deref() != Some(root.as_str()) {
+            args.extend(["--download-directory".into(), root]);
+        }
+        args.push("--module".into());
+        args.extend(modules.iter().cloned());
+        self.jobs.start(&cli, args, JobKind::InstallModules, &version, &editor.architecture, modules)
+    }
+
+    /// Removes installed modules from an editor (their folders and their children).
+    pub fn remove_modules(&self, version: String, architecture: String, modules: Vec<String>) -> Result<()> {
+        if modules.is_empty() {
+            return Ok(());
+        }
+        let editor = self.find_editor(&version, &architecture)?;
+        if self.jobs.is_running(&version, &editor.architecture) {
+            return Err(UniHubError::InvalidData {
+                message: format!("Unity {version} is being installed or changed; wait until it finishes"),
+            });
+        }
+        let cli = self.cli_path()?;
+        let mut args = vec!["editor", "module", "remove", version.as_str(), "--yes"];
+        let arch = cli_architecture(&editor.architecture);
+        args.extend(arch.iter().map(String::as_str));
+        args.push("--module");
+        args.extend(modules.iter().map(String::as_str));
+        unity_cli::run_json(&cli, &args).map(|_| ())
+    }
+
+    /// Uninstalls an editor (deletes its folder) with the Unity CLI.
+    pub fn uninstall_editor(&self, version: String, architecture: String) -> Result<()> {
+        let editor = self.find_editor(&version, &architecture)?;
+        if self.jobs.is_running(&version, &editor.architecture) {
+            return Err(UniHubError::InvalidData {
+                message: format!("Unity {version} is being installed or changed; wait until it finishes"),
+            });
+        }
+        let cli = self.cli_path()?;
+        let mut args = vec!["uninstall", version.as_str(), "--yes"];
+        let arch = cli_architecture(&editor.architecture);
+        args.extend(arch.iter().map(String::as_str));
+        unity_cli::run_json(&cli, &args).map(|_| ())
+    }
+
+    /// Installs started in this session, running and finished.
+    pub fn jobs(&self) -> Vec<Job> {
+        self.jobs.list()
+    }
+
+    /// Stops a running install. What was already installed stays.
+    pub fn cancel_job(&self, id: u64) {
+        self.jobs.cancel(id);
+    }
+
+    /// Removes a finished install from `jobs()`.
+    pub fn dismiss_job(&self, id: u64) {
+        self.jobs.dismiss(id);
     }
 
     // ---- Unity CLI ----------------------------------------------------------------
@@ -359,6 +529,27 @@ impl UniHub {
         }
     }
 
+    /// An installed editor by version and architecture (any architecture when it is
+    /// empty or there is a single build of that version).
+    fn find_editor(&self, version: &str, architecture: &str) -> Result<Editor> {
+        let matching: Vec<Editor> = self.list_editors().into_iter().filter(|e| e.version == version).collect();
+        matching
+            .iter()
+            .find(|e| e.architecture == architecture)
+            .or_else(|| if matching.len() == 1 { matching.first() } else { None })
+            .cloned()
+            .ok_or_else(|| UniHubError::EditorNotInstalled { version: version.to_string() })
+    }
+
+    /// A listed project whose folder is still a Unity project.
+    fn existing_project(&self, path: &str) -> Result<()> {
+        match self.store().get(path) {
+            Some(p) if p.exists => Ok(()),
+            Some(_) => Err(UniHubError::NotAProject { path: path.to_string() }),
+            None => Err(UniHubError::UnknownProject { path: path.to_string() }),
+        }
+    }
+
     /// The cached CLI if its binary is still there, otherwise a fresh search.
     fn cli_path(&self) -> Result<PathBuf> {
         let cached = lock(&self.cli).as_ref().map(|i| PathBuf::from(&i.path));
@@ -379,6 +570,14 @@ impl UniHub {
             }
         }
         paths
+    }
+}
+
+/// `--architecture <arch>` for the Unity CLI, which knows `arm64` and `x86_64` only.
+fn cli_architecture(architecture: &str) -> Vec<String> {
+    match architecture {
+        "arm64" | "x86_64" => vec!["--architecture".into(), architecture.into()],
+        _ => Vec::new(),
     }
 }
 

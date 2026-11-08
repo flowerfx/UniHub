@@ -30,6 +30,9 @@ pub enum UniHubError {
     #[error("Unity CLI: {message}")]
     CliFailed { code: String, message: String },
 
+    #[error("the project is open in Unity; close it first: {path}")]
+    ProjectInUse { path: String },
+
     #[error("cancelled")]
     Cancelled,
 }

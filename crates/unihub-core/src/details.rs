@@ -195,7 +195,7 @@ fn walk_size(project: &Path) -> ProjectSize {
     ProjectSize { total: folders.iter().map(|f| f.bytes).sum(), folders }
 }
 
-fn dir_size(dir: &Path) -> u64 {
+pub(crate) fn dir_size(dir: &Path) -> u64 {
     let mut total = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {

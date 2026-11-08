@@ -9,6 +9,7 @@ struct ProjectsView: View {
     /// Project whose details were open, restored on the next launch.
     /// `-detailsProject <path>` on the command line overrides it.
     @AppStorage("detailsProject") private var savedDetailsPath = ""
+    @State private var didOpenLaunchCleanup = false
 
     private var rows: [Project] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -82,6 +83,12 @@ struct ProjectsView: View {
                let project = model.projects.first(where: { $0.path == savedDetailsPath }) {
                 selection = [project.id]
                 model.showDetails(for: project)
+            }
+            // Development aid: `-cleanupProject <path>` opens Clean Up once at launch.
+            if !didOpenLaunchCleanup, let path = UserDefaults.standard.string(forKey: "cleanupProject"),
+               let project = model.projects.first(where: { $0.path == path }) {
+                didOpenLaunchCleanup = true
+                model.requestCleanup(of: project)
             }
         }
         .onChange(of: model.showDetails) { _, open in
@@ -248,6 +255,9 @@ private struct ProjectMenu: View {
             Task { await model.toggleFavorite(project) }
         }
         Divider()
+        Button("Clean Up…") { model.requestCleanup(of: project) }
+            .disabled(!project.exists)
+            .help("Free disk space: remove Library, Temp, Logs, generated .sln/.csproj files…")
         Button("Remove from List…", role: .destructive) { model.requestRemoval(of: project) }
     }
 }

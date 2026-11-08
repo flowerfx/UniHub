@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::modules;
 use crate::paths::{UniHubPaths, path_string};
+use crate::releases::Module;
 use crate::version;
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -23,6 +25,9 @@ pub struct Editor {
     pub architecture: String,
     /// Folder holding this version, e.g. `/Applications/Unity/Hub/Editor/6000.0.85f1`.
     pub install_dir: String,
+    /// Modules of this version from `modules.json` (installed ones have `installed`),
+    /// or only the installed ones found on disk when there is no `modules.json`.
+    pub modules: Vec<Module>,
 }
 
 /// Scans every editor root plus editors the official Hub lists as added by hand.
@@ -67,6 +72,7 @@ pub fn inspect(app: &Path) -> Option<Editor> {
         app_path: path_string(app),
         executable_path: path_string(&executable),
         architecture,
+        modules: modules::for_editor(&install_dir),
         install_dir: path_string(&install_dir),
     })
 }

@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use unihub_core::{UniHub, UniHubError, ReleaseStream};
+use unihub_core::{CleanMethod, JobState, ReleaseStream, UniHub, UniHubError};
 
 /// UniHub: manage Unity projects and editors from the terminal.
 #[derive(Parser)]
@@ -32,17 +32,75 @@ enum Cmd {
         #[arg(long)]
         size: bool,
     },
+    /// Free disk space by removing files Unity and IDEs regenerate (Library, Temp, Logs,
+    /// .sln/.csproj…). In a git repository: the files git ignores. Lists them unless --yes.
+    Clean {
+        project: String,
+        /// Delete the listed files for good (otherwise only list them).
+        #[arg(long)]
+        yes: bool,
+        /// Also remove ignored files nothing regenerates, e.g. builds and local settings.
+        #[arg(long)]
+        all: bool,
+    },
     /// List installed editors.
     Editors,
-    /// List editor releases available for Apple Silicon.
+    /// List editor releases for macOS (Apple Silicon, or Intel for older versions).
+    /// With --version and no --stream, searches every stream.
     Releases {
-        #[arg(long, value_enum, default_value = "lts")]
-        stream: Stream,
+        #[arg(long, value_enum)]
+        stream: Option<Stream>,
         #[arg(long, default_value_t = 10)]
         limit: u32,
-        /// Only versions starting with this, e.g. 6000.0
+        /// Only versions starting with this, e.g. 6000.0 or 2019.4
         #[arg(long)]
         version: Option<String>,
+        /// The newest release of each supported line (the Hub's "Official releases").
+        #[arg(long, conflicts_with_all = ["stream", "version"])]
+        recommended: bool,
+    },
+    /// Install an editor (and modules) with the Unity CLI, showing progress.
+    Install {
+        version: String,
+        /// arm64 or x86_64 (default: what the release offers, Apple Silicon first).
+        #[arg(long)]
+        arch: Option<String>,
+        /// Module ids to install with it, e.g. -m ios android android-sdk-ndk-tools
+        #[arg(short, long, num_args = 1..)]
+        module: Vec<String>,
+        /// Accept the license terms of the modules (required for some, e.g. the Android SDK).
+        #[arg(long)]
+        accept_terms: bool,
+    },
+    /// Uninstall an editor.
+    Uninstall {
+        version: String,
+        #[arg(long, default_value = "")]
+        arch: String,
+    },
+    /// List an installed editor's modules (✓ installed).
+    Modules {
+        version: String,
+        #[arg(long, default_value = "")]
+        arch: String,
+    },
+    /// Add modules to an installed editor, showing progress.
+    ModuleAdd {
+        version: String,
+        #[arg(short, long, num_args = 1.., required = true)]
+        module: Vec<String>,
+        #[arg(long, default_value = "")]
+        arch: String,
+        #[arg(long)]
+        accept_terms: bool,
+    },
+    /// Remove modules from an installed editor.
+    ModuleRemove {
+        version: String,
+        #[arg(short, long, num_args = 1.., required = true)]
+        module: Vec<String>,
+        #[arg(long, default_value = "")]
+        arch: String,
     },
     /// Import projects from the official Hub's list.
     Import,
@@ -179,27 +237,132 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
                 }
             }
         }
+        Cmd::Clean { project, yes, all } => {
+            let path = resolve_project(&unihub, &project)?;
+            let plan = unihub.clean_plan(path.clone())?;
+            let source = match plan.method {
+                CleanMethod::GitIgnored => "files ignored by git",
+                CleanMethod::UnityGenerated => "generated folders and files",
+            };
+            if plan.items.is_empty() {
+                println!("nothing to clean ({source})");
+                return Ok(());
+            }
+            let chosen: Vec<String> = plan
+                .items
+                .iter()
+                .filter(|i| all || i.kind.regenerated())
+                .map(|i| i.path.clone())
+                .collect();
+            for i in &plan.items {
+                let keep = !(all || i.kind.regenerated());
+                println!(
+                    "{} {:>10}  {}{}{}",
+                    if keep { " " } else { "-" },
+                    human_bytes(i.bytes),
+                    i.path,
+                    if i.is_dir { "/" } else { "" },
+                    if keep { "  (kept: not regenerated, use --all)" } else { "" }
+                );
+            }
+            let bytes: u64 = plan.items.iter().filter(|i| chosen.contains(&i.path)).map(|i| i.bytes).sum();
+            if !yes {
+                println!("would free {} from {} items ({source}); run with --yes to delete", human_bytes(bytes), chosen.len());
+                if plan.open_in_editor {
+                    println!("the project is open in Unity: close it first");
+                }
+                return Ok(());
+            }
+            let result = unihub.clean_project(path, chosen)?;
+            println!("removed {} items, freed {}", result.removed, human_bytes(result.freed_bytes));
+            for f in &result.failed {
+                eprintln!("could not remove {f}");
+            }
+        }
         Cmd::Editors => {
             for e in unihub.list_editors() {
                 println!("{:<14} {:<10} {}", e.version, e.architecture, e.app_path);
             }
         }
-        Cmd::Releases { stream, limit, version } => {
+        Cmd::Releases { stream, limit, version, recommended } => {
             let installed: Vec<String> =
                 unihub.list_editors().into_iter().map(|e| e.version).collect();
-            let page = unihub.fetch_releases(stream.into(), limit, 0, version)?;
-            println!("{} releases in total, showing {}", page.total, page.releases.len());
+            let page = match (stream, version) {
+                _ if recommended => {
+                    let releases = unihub.recommended_releases()?;
+                    unihub_core::ReleasePage { total: releases.len() as u32, offset: 0, releases }
+                }
+                (None, Some(v)) => unihub.search_releases(v, limit, 0)?,
+                (stream, version) => {
+                    unihub.fetch_releases(stream.unwrap_or(Stream::Lts).into(), limit, 0, version)?
+                }
+            };
+            if page.releases.is_empty() {
+                println!("no releases found");
+            } else {
+                println!("{} releases in total, showing {}", page.total, page.releases.len());
+            }
             for r in page.releases {
                 let size = r.editor.as_ref().map_or(0, |d| d.download_size);
-                let mark = if installed.contains(&r.version) { "  installed" } else { "" };
+                let mut mark = String::new();
+                if r.architecture == "x86_64" {
+                    mark.push_str("  Intel");
+                }
+                if r.recommended {
+                    mark.push_str("  recommended");
+                }
+                if installed.contains(&r.version) {
+                    mark.push_str("  installed");
+                }
                 println!(
-                    "{:<14} {:<10} {:>7.2} GB  {} modules{mark}",
+                    "{:<14} {:<9} {:<10} {:>7.2} GB  {} modules{mark}",
                     r.version,
+                    r.stream,
                     r.release_date.get(..10).unwrap_or(""),
                     size as f64 / 1e9,
                     r.modules.len(),
                 );
             }
+        }
+        Cmd::Install { version, arch, module, accept_terms } => {
+            let arch = match arch {
+                Some(a) => a,
+                None => unihub
+                    .search_releases(version.clone(), 25, 0)?
+                    .releases
+                    .into_iter()
+                    .find(|r| r.version == version)
+                    .map(|r| r.architecture)
+                    .ok_or_else(|| UniHubError::InvalidData { message: format!("no macOS release {version}") })?,
+            };
+            let id = unihub.install_editor(version, arch, module, accept_terms)?;
+            follow_job(&unihub, id)?;
+        }
+        Cmd::Uninstall { version, arch } => {
+            unihub.uninstall_editor(version.clone(), arch)?;
+            println!("uninstalled Unity {version}");
+        }
+        Cmd::Modules { version, arch } => {
+            let modules = unihub.editor_modules(version, arch)?;
+            for m in modules.iter().filter(|m| !m.hidden) {
+                let indent = if m.parent_id.is_some() { "    " } else { "" };
+                let terms = if m.terms.is_empty() { "" } else { "  (license terms)" };
+                println!(
+                    "{} {indent}{:<34} {:<36} {:>9}{terms}",
+                    if m.installed { "✓" } else { " " },
+                    m.id,
+                    m.name,
+                    human_bytes(m.download.download_size),
+                );
+            }
+        }
+        Cmd::ModuleAdd { version, module, arch, accept_terms } => {
+            let id = unihub.install_modules(version, arch, module, accept_terms)?;
+            follow_job(&unihub, id)?;
+        }
+        Cmd::ModuleRemove { version, module, arch } => {
+            unihub.remove_modules(version, arch, module.clone())?;
+            println!("removed {}", module.join(", "));
         }
         Cmd::Import => println!("imported {} projects", unihub.import_from_hub()?),
         Cmd::Account => {
@@ -267,6 +430,42 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
         Cmd::Settings => println!("{:#?}", unihub.settings()),
     }
     Ok(())
+}
+
+/// Prints a background install's progress until it ends.
+fn follow_job(unihub: &UniHub, id: u64) -> Result<(), UniHubError> {
+    let mut last = String::new();
+    loop {
+        let Some(job) = unihub.jobs().into_iter().find(|j| j.id == id) else { return Ok(()) };
+        let line = match job.percent {
+            Some(p) => format!("{} ({p:.0}%)", job.message),
+            None => job.message.clone(),
+        };
+        if line != last {
+            println!("{line}");
+            last = line;
+        }
+        match job.state {
+            JobState::Running => std::thread::sleep(std::time::Duration::from_millis(300)),
+            JobState::Succeeded => return Ok(()),
+            JobState::Cancelled => return Err(UniHubError::Cancelled),
+            JobState::Failed => {
+                return Err(UniHubError::CliFailed {
+                    code: "INSTALL_FAILED".into(),
+                    message: job.error.unwrap_or_else(|| "the install failed".into()),
+                });
+            }
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1_000_000_000 => format!("{:.2} GB", b as f64 / 1e9),
+        b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
+        b if b >= 1_000 => format!("{:.0} KB", b as f64 / 1e3),
+        b => format!("{b} B"),
+    }
 }
 
 /// Accepts a path or a project title.

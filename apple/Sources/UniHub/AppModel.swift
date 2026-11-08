@@ -9,12 +9,30 @@ final class AppModel {
     // Projects and editors
     var projects: [Project] = []
     var editors: [Editor] = []
+    /// False until the first project and editor scan finishes (avoids flashing "empty").
+    private(set) var hasLoadedLocal = false
 
     // Releases
-    var stream: ReleaseStream = .lts
+    /// Releases page tab; Recommended (the Hub's "Official releases") first.
+    var releaseTab: ReleaseTab = .recommended
     var releases: [Release] = []
     var releaseTotal: UInt32 = 0
     var isLoadingReleases = false
+    /// Version search on the Releases page ("2022.3"); searches every stream when set.
+    var releaseQuery = ""
+    /// Why the last release list failed to load. Shown in the list, not as an alert.
+    var releaseError: String?
+    /// Bumped on every fresh load, so a slower earlier load cannot add stale rows.
+    private var releaseGeneration = 0
+
+    // Installing editors and modules
+    private(set) var jobs: [Job] = []
+    private var jobPolling: Task<Void, Never>?
+    /// Release whose "Install" sheet is open.
+    var installingRelease: Release?
+    /// Editor whose "Modules" sheet is open.
+    var modulesEditor: Editor?
+    var editorPendingUninstall: Editor?
 
     // Settings
     private(set) var settings: Settings
@@ -39,6 +57,9 @@ final class AppModel {
     private(set) var detailsSize: ProjectSize?
     private(set) var isLoadingDetails = false
     private(set) var isLoadingSize = false
+
+    /// The open "Clean Up" sheet, if any.
+    var cleanup: Cleanup?
 
     var isAddingProject = false
     var projectPendingRemoval: Project?
@@ -76,6 +97,7 @@ final class AppModel {
         }.value
         self.projects = projects
         self.editors = editors
+        hasLoadedLocal = true
     }
 
     func addProject(at url: URL) async {
@@ -168,6 +190,48 @@ final class AppModel {
         isLoadingSize = false
     }
 
+    // MARK: Clean up
+
+    /// Opens the Clean Up sheet and measures what it would remove.
+    func requestCleanup(of project: Project) {
+        cleanup = Cleanup(project: project)
+        Task { await loadCleanupPlan() }
+    }
+
+    func loadCleanupPlan() async {
+        guard let unihub, let path = cleanup?.project.path else { return }
+        cleanup?.isMeasuring = true
+        cleanup?.error = nil
+        let result = await Task.detached { Result { try unihub.cleanPlan(path: path) } }.value
+        guard cleanup?.project.path == path else { return }  // closed or replaced meanwhile
+        cleanup?.isMeasuring = false
+        switch result {
+        case .success(let plan):
+            cleanup?.plan = plan
+            // Pre-select what Unity or the IDE recreates; never builds or ignored assets.
+            cleanup?.selected = Set(plan.items.filter { $0.kind != .other }.map(\.path))
+        case .failure(let error):
+            cleanup?.error = describe(error)
+        }
+    }
+
+    func performCleanup() async {
+        guard let unihub, let current = cleanup, current.plan != nil, !current.selected.isEmpty else { return }
+        let path = current.project.path
+        let items = Array(current.selected)
+        cleanup?.isDeleting = true
+        cleanup?.error = nil
+        let result = await Task.detached { Result { try unihub.cleanProject(path: path, items: items) } }.value
+        guard cleanup?.project.path == path else { return }
+        cleanup?.isDeleting = false
+        switch result {
+        case .success(let done): cleanup?.result = done
+        case .failure(let error): cleanup?.error = describe(error)
+        }
+        if detailsPath == path { reloadDetails() }  // the size on disk changed
+        await refreshLocal()
+    }
+
     func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -179,26 +243,141 @@ final class AppModel {
 
     // MARK: Releases
 
+    /// Loads the selected stream, or searches every stream when `releaseQuery` is set.
+    /// Failures show in the list (`releaseError`), never as an alert.
     func loadReleases(reset: Bool) async {
-        guard let unihub, !isLoadingReleases else { return }
+        guard let unihub else { return }
         if reset {
+            releaseGeneration += 1
             releases = []
             releaseTotal = 0
+            releaseError = nil
+        } else if isLoadingReleases {
+            return
         }
         isLoadingReleases = true
-        defer { isLoadingReleases = false }
+        let generation = releaseGeneration
 
-        let stream = self.stream
+        let stream = releaseTab.stream
+        let query = releaseQuery.trimmingCharacters(in: .whitespaces)
         let offset = UInt32(releases.count)
-        do {
-            let page = try await Task.detached {
-                try unihub.fetchReleases(stream: stream, limit: 25, offset: offset, versionPrefix: nil)
-            }.value
-            guard stream == self.stream else { return }  // user switched tabs meanwhile
+        let result = await Task.detached {
+            Result {
+                if !query.isEmpty {
+                    return try unihub.searchReleases(query: query, limit: 25, offset: offset)
+                }
+                guard let stream else {
+                    let list = try unihub.recommendedReleases()
+                    return ReleasePage(total: UInt32(list.count), offset: 0, releases: list)
+                }
+                return try unihub.fetchReleases(stream: stream, limit: 25, offset: offset, versionPrefix: nil)
+            }
+        }.value
+        // The user switched tabs or typed meanwhile: a newer load owns the list.
+        guard generation == releaseGeneration else { return }
+        isLoadingReleases = false
+        switch result {
+        case .success(let page):
             releases += page.releases
             releaseTotal = page.total
-        } catch {
-            errorMessage = describe(error)
+        case .failure(let error):
+            releaseError = describe(error)
+        }
+    }
+
+    // MARK: Installing editors and modules
+
+    /// Folder new editors go into.
+    var editorInstallDir: String { unihub?.editorInstallDir() ?? "/Applications/Unity/Hub/Editor" }
+
+    /// The running install of this version, if any.
+    func runningJob(version: String) -> Job? {
+        jobs.last { $0.version == version && $0.state == .running }
+    }
+
+    func isBusy(_ editor: Editor) -> Bool {
+        runningJob(version: editor.version) != nil
+    }
+
+    /// Starts installing an editor in the background. Returns false (and shows why) if
+    /// it could not start.
+    func installEditor(_ release: Release, modules: [String], acceptTerms: Bool) async -> Bool {
+        let version = release.version
+        let architecture = release.architecture
+        let started = await perform {
+            _ = try $0.installEditor(version: version, architecture: architecture, modules: modules, acceptTerms: acceptTerms)
+        }
+        if started { pollJobs() }
+        return started
+    }
+
+    /// Every module of an installed editor (installed ones marked).
+    func modules(of editor: Editor) async -> Result<[Module], Error> {
+        guard let unihub else { return .success(editor.modules) }
+        let version = editor.version
+        let architecture = editor.architecture
+        return await Task.detached {
+            Result { try unihub.editorModules(version: version, architecture: architecture) }
+        }.value
+    }
+
+    /// Removes modules right away, then adds the others in the background.
+    func changeModules(of editor: Editor, add: [String], remove: [String], acceptTerms: Bool) async -> Bool {
+        let version = editor.version
+        let architecture = editor.architecture
+        if !remove.isEmpty {
+            let removed = await perform {
+                try $0.removeModules(version: version, architecture: architecture, modules: remove)
+            }
+            guard removed else { return false }
+        }
+        if !add.isEmpty {
+            let started = await perform {
+                _ = try $0.installModules(version: version, architecture: architecture, modules: add, acceptTerms: acceptTerms)
+            }
+            if started { pollJobs() }
+            await refreshLocal()
+            return started
+        }
+        await refreshLocal()
+        return true
+    }
+
+    func uninstall(_ editor: Editor) async {
+        let version = editor.version
+        let architecture = editor.architecture
+        if await perform({ try $0.uninstallEditor(version: version, architecture: architecture) }) {
+            await refreshLocal()
+        }
+    }
+
+    func cancelJob(_ job: Job) {
+        unihub?.cancelJob(id: job.id)
+        pollJobs()
+    }
+
+    func dismissJob(_ job: Job) {
+        unihub?.dismissJob(id: job.id)
+        jobs.removeAll { $0.id == job.id }
+    }
+
+    /// Polls the core's installs while one is running; refreshes the editor list when
+    /// an install ends.
+    func pollJobs() {
+        guard jobPolling == nil, let unihub else { return }
+        jobPolling = Task { [weak self] in
+            while !Task.isCancelled {
+                let latest = await Task.detached { unihub.jobs() }.value
+                guard let self else { return }
+                let ended = latest.contains { job in
+                    job.state != .running && self.jobs.contains { $0.id == job.id && $0.state == .running }
+                }
+                self.jobs = latest
+                if ended { await self.refreshLocal() }
+                if !latest.contains(where: { $0.state == .running }) { break }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            self?.jobPolling = nil
         }
     }
 
@@ -401,6 +580,54 @@ final class AppModel {
             errorMessage = describe(error)
             return false
         }
+    }
+}
+
+/// Tabs of the Releases page.
+enum ReleaseTab: String, CaseIterable, Identifiable {
+    case recommended, lts, supported, beta, alpha, tech
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .recommended: "Recommended"
+        case .lts: "LTS"
+        case .supported: "Supported"
+        case .beta: "Beta"
+        case .alpha: "Alpha"
+        case .tech: "Tech"
+        }
+    }
+
+    /// `nil` for Recommended, which spans streams.
+    var stream: ReleaseStream? {
+        switch self {
+        case .recommended: nil
+        case .lts: .lts
+        case .supported: .supported
+        case .beta: .beta
+        case .alpha: .alpha
+        case .tech: .tech
+        }
+    }
+}
+
+/// State of the Clean Up sheet for one project.
+struct Cleanup: Identifiable {
+    let project: Project
+    var plan: CleanPlan?
+    /// Paths (from `plan`) to delete.
+    var selected: Set<String> = []
+    var isMeasuring = false
+    var isDeleting = false
+    var result: CleanResult?
+    var error: String?
+
+    var id: String { project.path }
+
+    var selectedBytes: UInt64 {
+        plan?.items.filter { selected.contains($0.path) }.reduce(0) { $0 + $1.bytes } ?? 0
     }
 }
 

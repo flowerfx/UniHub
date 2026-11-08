@@ -31,7 +31,8 @@ struct ContentView: View {
             List(Page.allCases, selection: Binding<Page?>(get: { page }, set: { page = $0 ?? .projects })) { item in
                 Label(item.rawValue, systemImage: item.symbol)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            // Wide enough for the traffic lights, the app name and the sidebar button.
+            .navigationSplitViewColumnWidth(min: 236, ideal: 240)
             .safeAreaInset(edge: .bottom) {
                 AccountBadge(model: model)
                     .padding(10)
@@ -44,6 +45,8 @@ struct ContentView: View {
             case .tools: ToolsView()
             }
         }
+        .background(TitlebarBrand())
+        .sheet(item: $model.cleanup) { _ in CleanupView(model: model) }
         .task {
             // Development aid: `-openSettings YES` opens Settings at launch.
             if UserDefaults.standard.bool(forKey: "openSettings") { openSettings() }
@@ -58,6 +61,47 @@ struct ContentView: View {
             actions: { Button("OK", role: .cancel) {} },
             message: { Text(model.errorMessage ?? "") }
         )
+    }
+}
+
+/// Puts `AppBrand` in the window's title bar, right after the traffic lights, where the
+/// official Hub shows its logo. SwiftUI toolbar placements put it in the detail column instead.
+private struct TitlebarBrand: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { WindowProbe() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class WindowProbe: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window,
+                  !window.titlebarAccessoryViewControllers.contains(where: { $0.identifier == Self.id })
+            else { return }
+            let host = NSHostingView(rootView: AppBrand().padding(.leading, 4).padding(.trailing, 2))
+            host.frame.size = host.fittingSize
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.identifier = Self.id
+            accessory.view = host
+            accessory.layoutAttribute = .leading
+            window.addTitlebarAccessoryViewController(accessory)
+        }
+
+        static let id = NSUserInterfaceItemIdentifier("UniHubBrand")
+    }
+}
+
+/// App icon and name at the top of the window, next to the traffic lights.
+private struct AppBrand: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 28, height: 28)
+            Text("UniHub")
+                .font(.system(size: 15, weight: .bold))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("UniHub")
     }
 }
 

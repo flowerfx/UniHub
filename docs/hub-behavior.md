@@ -94,6 +94,19 @@ Response: `{ total, results: [Release] }`, where each `Release` has
 Hub 3.22 itself also polls `https://public-cdn.cloud.unity3d.com/hub/prod/releases-silicon.json`.
 The services API above is the supported, documented one, so we use that.
 
+Notes from using it:
+- Leaving out `architecture` returns every macOS release with all its builds; releases
+  before 2021 (and their 2025 security re-releases) only have `X86_64` builds.
+- Leaving out `stream` searches every stream; `version` is a prefix match (`2022.3`,
+  `2022.3.1` → 2022.3.1x). Queries that match nothing return `total: 0`.
+- Releases carry `hasSupportEnded` and `endOfLifeDate` (e.g. 2022.3 LTS: ended 2026-05-08;
+  6000.4/6000.5 Supported: ended once 6000.6 shipped). Only one release is `recommended`
+  (the newest Supported). The Hub's "Official releases" tab matches: the newest release of
+  each Supported and LTS line whose support has not ended (6000.6.8f1 Supported +
+  Recommended, 6000.3.28f1 LTS, 6000.0.85f2 LTS on 2026-11-08).
+- Sizes are usually whole numbers but some are fractional (`{"value": 658719121.2}`), and
+  some fields are `null` rather than missing (`"eula": null`).
+
 ## 4. Download / install pipeline
 
 The `install-state.db` schema shows the states the Hub uses:
@@ -104,14 +117,59 @@ The `install-state.db` schema shows the states the Hub uses:
 
 Steps:
 1. Download the editor `.pkg` and verify the md5 `integrity`.
-2. Install it into `<root>/<version>/`. **To verify:** whether the Hub expands the pkg
-   payload itself (`pkgutil --expand-full`, or xar + cpio) to avoid needing admin rights,
-   or runs `installer`. We can use `pkgutil --expand-full` either way.
+2. Install it into `<root>/<version>/` (or `<root>/<version>-<arch>` when that folder is
+   taken). The Hub expands the pkg payload itself (xar, then the payload archive), so no
+   admin rights are needed; it runs `installer` only for packages without a destination,
+   such as Visual Studio.
 3. For each module, download and install by `type` into `destination`. Destinations use
    the placeholder `{UNITY_PATH}` for the editor's install folder, e.g.
    `{UNITY_PATH}/PlaybackEngines` for iOS Build Support. Some tools go elsewhere, e.g.
    Visual Studio Code goes to `/Applications`.
 4. Write `modules.json` and `metadata.hub.json` so the official Hub still recognises the install.
+   On install the Hub writes the whole flattened module list with `selected: false`, then
+   flips `selected` to true for each module that installs. Module PKGs are unpacked into
+   `destination`, ZIPs unzipped, `.po` files copied, DMGs mounted and copied; then
+   `renameFrom` → `renameTo` is applied.
+
+### Modules of an installed editor (observed with REA, Hub 3.22.6)
+
+- **Installed flag:** `selected: true` in `<editor>/modules.json`. `isInstalled` is derived
+  when the list is read (it is only true on its own for Visual Studio Code, which the Hub
+  finds in `/Applications`). For editors it installed, the Hub trusts `modules.json` and
+  does not check the disk. For editors added with "Locate" it probes each module's
+  destination once and then writes `modules.json` / `metadata.hub.json`.
+- **Installs page chips:** one per build platform, from a folder scan of
+  `<editor>/PlaybackEngines` and `Unity.app/Contents/PlaybackEngines` (so the built-in Mac
+  platform always shows), not from `modules.json`.
+- **Add modules dialog:** lists modules that are not hidden, grouped by category, children
+  nested one level under their parent (Android → OpenJDK, Android SDK & NDK Tools). Hidden
+  children (NDK, CMake, SDK platforms…) come along with their parent. Ticking a parent ticks
+  its children; ticking a child ticks its parent; children can be unticked. Installed rows
+  show "Installed" instead of a checkbox. The dialog shows required and available disk space
+  and blocks installing when space is short.
+- **License terms:** each selected module with `eula` gets its own page with an "I have read
+  and agree" checkbox; Install stays disabled until every page is accepted. Acceptance is not
+  stored.
+- **Removing (Hub 3.22):** offered only for modules whose files are inside the editor folder
+  (not Visual Studio Code). Deletes the module's folder (`PlaybackEngines/<Platform>`,
+  standalone `Variations`, a language's `.po` file) and sets `selected: false`.
+- **Intel editors:** the main list asks for Apple Silicon builds only; the archive offers
+  Intel builds for versions without one, labelled "Intel".
+
+### How UniHub does it
+
+UniHub drives the official Unity CLI instead of reimplementing the pipeline:
+`unity install <version> --architecture <arch> --no-child-modules --module <ids…>` and
+`unity install-modules --editor-version <version> --no-child-modules --module <ids…>`, both
+with `--format ndjson`, which prints `{"type":"progress","pct","msg","phase"}` lines and a
+final `{"type":"result","success","errors"}`. With `--no-child-modules` only the visible
+children the user kept ticked are installed; their hidden dependencies are added by the CLI.
+`--accept-eula` is passed only after the user ticked every license checkbox. The CLI skips
+unknown module ids with a plain-text "Missing module" note, so UniHub treats that as a
+failure. Removing uses `unity editor module remove <version> --module <ids…> --yes`, and
+uninstalling `unity uninstall <version> --yes`. `--download-directory <root>` is passed
+when UniHub's install folder differs from the CLI's (`unity install-path`). The CLI keeps
+`modules.json` up to date, and waits while another install (its own or the Hub's) runs.
 
 ## 5. Launching an editor
 
