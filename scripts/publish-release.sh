@@ -58,7 +58,8 @@ TAG="v$VERSION"
 BRANCH=$(git branch --show-current)
 HEAD_SHA=$(git rev-parse HEAD)
 
-[ -z "$(git status --porcelain)" ] ||
+# This script itself does not end up in the DMG, so its own edits do not count.
+[ -z "$(git status --porcelain -- . ':(exclude)scripts/publish-release.sh')" ] ||
   problem "the working tree has uncommitted changes; commit them first (the release is built from the committed code)"
 git fetch --quiet origin || problem "could not fetch from origin"
 [ -n "$(git branch -r --contains "$HEAD_SHA" 2>/dev/null)" ] ||
@@ -151,10 +152,16 @@ login_with_gh() {
     if [[ "$answer" =~ ^[Nn] ]]; then die "cancelled"; fi
     brew install gh >/dev/tty 2>&1
   fi
-  echo "GitHub CLI shows a one-time code and opens github.com in your browser: sign in there" >&2
-  echo "(your passkey works), enter the code, and come back here." >&2
-  gh auth login --hostname github.com --git-protocol https --web </dev/tty >/dev/tty 2>&1 ||
-    die "GitHub CLI sign-in did not finish"
+  echo "GitHub CLI copies a one-time code to the clipboard and opens github.com/login/device:" >&2
+  echo "sign in there (your passkey works), paste the code and authorize. This continues by itself." >&2
+  # Without its own prompts: GitHub CLI's interactive questions break in some terminals
+  # ("unexpected escape sequence from terminal"); the git question is asked below instead.
+  GH_PROMPT_DISABLED=1 NO_COLOR=1 gh auth login --hostname github.com --git-protocol https --web \
+    </dev/null >&2 2>&1 || die "GitHub CLI sign-in did not finish"
+  answer=$(ask "Let git push use this GitHub login too, instead of asking for a password? [Y/n] ")
+  if [[ ! "$answer" =~ ^[Nn] ]]; then
+    gh auth setup-git --hostname github.com >&2 && echo "git now signs in to github.com through GitHub CLI." >&2
+  fi
   gh auth token
 }
 
@@ -217,7 +224,7 @@ field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])'
 REQUEST=$(TAG="$TAG" SHA="$HEAD_SHA" NOTES="$NOTES" VERSION="$VERSION" python3 -c 'import json,os
 print(json.dumps({"tag_name": os.environ["TAG"], "target_commitish": os.environ["SHA"],
                   "name": "UniHub " + os.environ["VERSION"], "body": os.environ["NOTES"], "draft": True}))')
-echo "Creating draft release $TAG…"
+echo "Creating draft release ${TAG}…"
 RELEASE=$(api POST "https://api.github.com/repos/$SLUG/releases" "$REQUEST")
 RELEASE_ID=$(printf '%s' "$RELEASE" | field id)
 # Remove the draft again if anything below fails.
