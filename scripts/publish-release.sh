@@ -13,10 +13,11 @@
 #   --dry-run          check and show everything, publish nothing (no token needed)
 #   --yes              do not ask before publishing
 #
-# Token: a GitHub token that may write the repository's contents (classic: "repo" or
-# "public_repo" scope; fine-grained: Contents read and write). Taken from $GH_TOKEN or
-# $GITHUB_TOKEN, then `gh auth token` (GitHub CLI), then the credential git has stored for
-# github.com (git asks for it if none is stored: paste the token, not your password).
+# Sign-in: GitHub lets scripts publish only with a token; a passkey or password cannot be
+# used here. The script uses $GH_TOKEN or $GITHUB_TOKEN, GitHub CLI's login, or a token git
+# keeps for github.com. With none, it asks: sign in in the browser with GitHub CLI (works
+# with a passkey; offers to install it with Homebrew), or paste a personal access token
+# (fine-grained: this repository, Contents read and write; classic: "public_repo").
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +31,7 @@ while [ $# -gt 0 ]; do
     --skip-build) SKIP_BUILD=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes | -y) ASSUME_YES=1; shift ;;
-    -h | --help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -113,17 +114,81 @@ if [ "$ASSUME_YES" != 1 ]; then
 fi
 
 # --- Token -----------------------------------------------------------------------
-github_token() {
+# A token that is already there, without prompting: environment, GitHub CLI, or one that
+# git keeps for github.com (Keychain, Git Credential Manager).
+stored_token() {
   if [ -n "${GH_TOKEN:-}" ]; then printf '%s' "$GH_TOKEN"; return; fi
   if [ -n "${GITHUB_TOKEN:-}" ]; then printf '%s' "$GITHUB_TOKEN"; return; fi
   if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then gh auth token; return; fi
   local user
   user=$(printf '%s' "$REMOTE" | sed -nE 's#^https://([^@/:]+)@github\.com/.*#\1#p')
   printf 'protocol=https\nhost=github.com\n%s\n' "${user:+username=$user}" |
-    git credential fill 2>/dev/null | sed -n 's/^password=//p'
+    GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git credential fill 2>/dev/null | sed -n 's/^password=//p' || true
 }
-TOKEN=$(github_token)
-[ -n "$TOKEN" ] || die "no GitHub token: set GH_TOKEN, sign in with GitHub CLI (gh auth login), or store one for git"
+
+# True when GitHub accepts the token.
+token_works() {
+  [ -n "$1" ] || return 1
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -K - https://api.github.com/user \
+    <<<"header = \"Authorization: Bearer $1\"") || return 1
+  [ "$code" = 200 ]
+}
+
+# Prompts read from the terminal, so they also work inside $(...).
+ask() {
+  local reply
+  read -r -p "$1" reply </dev/tty
+  printf '%s' "$reply"
+}
+
+# Browser sign-in through GitHub CLI; passkeys work there. Prints the token.
+login_with_gh() {
+  if ! command -v gh >/dev/null 2>&1; then
+    command -v brew >/dev/null 2>&1 ||
+      die "GitHub CLI is not installed; install it from https://cli.github.com and run this again"
+    answer=$(ask "GitHub CLI is not installed. Install it now with Homebrew (brew install gh)? [Y/n] ")
+    if [[ "$answer" =~ ^[Nn] ]]; then die "cancelled"; fi
+    brew install gh >/dev/tty 2>&1
+  fi
+  echo "GitHub CLI shows a one-time code and opens github.com in your browser: sign in there" >&2
+  echo "(your passkey works), enter the code, and come back here." >&2
+  gh auth login --hostname github.com --git-protocol https --web </dev/tty >/dev/tty 2>&1 ||
+    die "GitHub CLI sign-in did not finish"
+  gh auth token
+}
+
+paste_token() {
+  echo "Create a token at https://github.com/settings/personal-access-tokens/new" >&2
+  echo "(sign in with your passkey): Repository access: Only select repositories: $SLUG;" >&2
+  echo "Permissions: Contents: Read and write." >&2
+  local token
+  read -r -s -p "Paste the token (it is not shown): " token </dev/tty
+  echo >&2
+  printf '%s' "$token"
+}
+
+TOKEN=$(stored_token)
+if [ -n "$TOKEN" ] && ! token_works "$TOKEN"; then
+  echo "The saved GitHub token was refused (expired or revoked)." >&2
+  TOKEN=""
+fi
+if [ -z "$TOKEN" ]; then
+  ( : </dev/tty ) 2>/dev/null ||
+    die "no GitHub token. Run this in a terminal to sign in, or set GH_TOKEN (see --help)"
+  echo >&2
+  echo "Publishing needs a GitHub token: GitHub does not let scripts use a passkey or password." >&2
+  echo "How do you want to sign in?" >&2
+  echo "  1) In the browser with GitHub CLI (works with your passkey; recommended)" >&2
+  echo "  2) Paste a personal access token" >&2
+  choice=$(ask "Choose 1 or 2 [1]: ")
+  case "${choice:-1}" in
+    1) TOKEN=$(login_with_gh) ;;
+    2) TOKEN=$(paste_token) ;;
+    *) die "cancelled" ;;
+  esac
+  token_works "$TOKEN" || die "GitHub did not accept that token"
+fi
 
 # The token goes to curl through a config on a pipe, never on the command line.
 AUTH_CONFIG=$(printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' "$TOKEN")
@@ -139,6 +204,9 @@ api() {
     message=$(printf '%s' "$out" | python3 -c 'import json,sys
 try: d=json.load(sys.stdin); print(d.get("message",""), "".join(" / "+e.get("message",e.get("code","")) for e in d.get("errors",[]) if isinstance(e,dict)))
 except Exception: print("")')
+    case "$code" in
+      401 | 403 | 404) message="$message (the token must be allowed to write $SLUG: Contents read and write)" ;;
+    esac
     die "GitHub answered $code to $1 $2: $message"
   fi
   printf '%s' "$out"
