@@ -176,8 +176,15 @@ private struct PluginRow: View {
                 }
                 if plugin.kind == "runtime" {
                     Text("Used by the CLI").font(.caption).foregroundStyle(.secondary)
-                } else {
+                } else if plugin.managed {
                     Button("Remove", action: onRemove)
+                } else {
+                    // Found elsewhere (npm, Homebrew…): the Unity CLI cannot remove it.
+                    Text("Installed outside the Unity CLI")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help(plugin.path.map { "At \($0). Remove it the way it was installed." }
+                              ?? "Remove it the way it was installed.")
                 }
             }
         }

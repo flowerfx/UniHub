@@ -532,8 +532,18 @@ impl UniHub {
         unity_cli::run_json(&self.cli_path()?, &args).map(|_| ())
     }
 
+    /// Removes a tool the Unity CLI installed. Tools installed some other way are reported
+    /// as an error instead of silently staying.
     pub fn remove_plugin(&self, id: String) -> Result<()> {
-        unity_cli::run_json(&self.cli_path()?, &["plugin", "remove", &id, "--yes"]).map(|_| ())
+        let cli = self.cli_path()?;
+        let data = match unity_cli::run_json(&cli, &["plugin", "remove", &id, "--yes"]) {
+            // Older CLIs have no --yes here; they do not ask when not interactive either.
+            Err(UniHubError::CliFailed { message, .. }) if message.contains("--yes") => {
+                unity_cli::run_json(&cli, &["plugin", "remove", &id])?
+            }
+            other => other?,
+        };
+        unity_cli::check_plugin_removed(&data, &id)
     }
 }
 

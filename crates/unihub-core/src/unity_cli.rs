@@ -89,6 +89,9 @@ pub struct Plugin {
     pub newer_version: Option<String>,
     /// Set when this plugin needs a newer CLI first.
     pub blocked_by_cli_version: Option<String>,
+    /// Installed by the Unity CLI itself, so it can update or remove it. False for a copy
+    /// found elsewhere on the Mac (npm, Homebrew, the Hub…).
+    pub managed: bool,
 }
 
 // ---- Locating the CLI -----------------------------------------------------------
@@ -182,15 +185,52 @@ pub(crate) fn parse_output(stdout: &[u8], stderr: &[u8], exit: Option<i32>) -> R
                 message: first.map_or_else(|| "the command failed".into(), |e| e.message),
             })
         }
-        _ => {
-            let text = String::from_utf8_lossy(if stderr.is_empty() { stdout } else { stderr });
-            let message = text.trim().lines().last().unwrap_or("no output").to_string();
-            Err(UniHubError::CliFailed {
-                code: exit.map_or_else(|| "signal".into(), |c| format!("exit-{c}")),
-                message,
-            })
-        }
+        _ => Err(UniHubError::CliFailed {
+            code: exit.map_or_else(|| "signal".into(), |c| format!("exit-{c}")),
+            message: plain_error(&String::from_utf8_lossy(stderr), &String::from_utf8_lossy(stdout)),
+        }),
     }
+}
+
+/// The useful line of output that is not JSON. An older CLI that does not know a command
+/// or option prints `error: …` and then its help; the last line of the help says nothing.
+pub(crate) fn plain_error(stderr: &str, stdout: &str) -> String {
+    let text = format!("{stderr}\n{stdout}");
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let printed_help = lines.iter().any(|l| l.starts_with("Usage:"));
+    let error = lines
+        .iter()
+        .find(|l| l.to_ascii_lowercase().starts_with("error:"))
+        .map(|l| l[6..].trim().to_string());
+    match (error, printed_help) {
+        (Some(e), true) => format!("{e} (the Unity CLI may be out of date: update it on the Tools page)"),
+        (Some(e), false) => e,
+        (None, true) => "the Unity CLI did not understand the command; it may be out of date (update it on the Tools page)".into(),
+        (None, false) => lines.last().map_or_else(|| "no output".to_string(), |l| l.to_string()),
+    }
+}
+
+/// Checks the result of `unity plugin remove`: the CLI reports success but removes nothing
+/// when the tool was not installed by it (`outcome: not-managed`).
+pub(crate) fn check_plugin_removed(data: &Value, id: &str) -> Result<()> {
+    let Some(entry) = data
+        .get("plugins")
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().find(|p| str_field(p, "id").as_deref() == Some(id)))
+    else {
+        return Ok(());
+    };
+    if str_field(entry, "outcome").as_deref() == Some("not-managed") {
+        let name = str_field(entry, "name").unwrap_or_else(|| id.to_string());
+        let place = str_field(entry, "path").map(|p| format!(" (it is at {p})")).unwrap_or_default();
+        return Err(UniHubError::CliFailed {
+            code: "NOT_MANAGED".into(),
+            message: format!(
+                "{name} was not installed by the Unity CLI{place}, so it cannot be removed here. Remove it the way it was installed, for example with npm or Homebrew."
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Offset of the first line that starts with `{` (0 if none).
@@ -317,6 +357,9 @@ pub(crate) fn parse_plugins(data: &Value) -> Vec<Plugin> {
                 available_version: str_field(p, "pinnedVersion").or_else(|| str_field(p, "resolvedVersion")),
                 newer_version: str_field(p, "newestVersion"),
                 blocked_by_cli_version: str_field(p, "blockedByCliVersion"),
+                managed: installed
+                    && (str_field(p, "resolvedFrom").as_deref() == Some("managed")
+                        || str_field(p, "source").as_deref() == Some("managed")),
             })
         })
         .collect()
@@ -423,6 +466,28 @@ trailing noise"#;
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn explains_plain_text_failures() {
+        let help = "error: unknown option '--yes'\n\nUsage: unity plugin [options] [command]\n\nExamples:\n  unity plugin remove ugs        Remove the managed copy\n";
+        let message = plain_error(help, "");
+        assert!(message.starts_with("unknown option '--yes'"), "{message}");
+        assert!(message.contains("out of date"));
+        assert!(plain_error("Usage: unity plugin\n  unity plugin remove ugs  Remove the managed copy\n", "").contains("did not understand"));
+        assert_eq!(plain_error("", "something broke\n"), "something broke");
+        assert!(matches!(parse_output(help.as_bytes(), b"", Some(1)), Err(UniHubError::CliFailed { message, .. }) if message.contains("--yes")));
+    }
+
+    #[test]
+    fn reports_tools_it_did_not_remove() {
+        let not_managed = json!({ "plugins": [{ "id": "ugs", "name": "Unity Gaming Services CLI", "outcome": "not-managed", "path": "/opt/homebrew/bin/ugs" }] });
+        let err = check_plugin_removed(&not_managed, "ugs").unwrap_err();
+        assert!(err.to_string().contains("not installed by the Unity CLI"));
+        assert!(err.to_string().contains("/opt/homebrew/bin/ugs"));
+        let removed = json!({ "plugins": [{ "id": "ugs", "outcome": "removed" }] });
+        assert!(check_plugin_removed(&removed, "ugs").is_ok());
+        assert!(check_plugin_removed(&json!(null), "ugs").is_ok());
     }
 
     #[test]
