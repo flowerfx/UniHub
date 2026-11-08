@@ -25,6 +25,13 @@ enum Cmd {
         #[arg(long)]
         editor: Option<String>,
     },
+    /// Show a project's details: settings, render pipeline, build target, source control.
+    Info {
+        project: String,
+        /// Also measure disk usage (can take a few seconds).
+        #[arg(long)]
+        size: bool,
+    },
     /// List installed editors.
     Editors,
     /// List editor releases available for Apple Silicon.
@@ -114,7 +121,10 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
                     _ => "",
                 };
                 let star = if p.is_favorite { "★ " } else { "  " };
-                println!("{star}{:<32} {:<14} {}{mark}", p.title, version, p.path);
+                let vcs = p.source_control.as_ref().map_or(String::new(), |sc| {
+                    format!("{} {}", sc.provider.display_name(), sc.branch.clone().unwrap_or_default())
+                });
+                println!("{star}{:<28} {:<13} {:<34} {}{mark}", p.title, version, vcs, p.path);
             }
         }
         Cmd::Add { path } => {
@@ -126,6 +136,48 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
             let path = resolve_project(&unihub, &project)?;
             unihub.open_project(path.clone(), editor)?;
             println!("opening {path}");
+        }
+        Cmd::Info { project, size } => {
+            let path = resolve_project(&unihub, &project)?;
+            let d = unihub.project_details(path.clone())?;
+            let show = |label: &str, value: Option<String>| {
+                if let Some(v) = value.filter(|v| !v.is_empty()) {
+                    println!("{label:<18} {v}");
+                }
+            };
+            show("Path", Some(d.path.clone()));
+            show("Product", d.product_name.clone());
+            show("Company", d.company_name.clone());
+            show("Version", d.version.clone());
+            show("Render pipeline", d.render_pipeline.clone());
+            show("Build target", d.build_target.clone());
+            show("Scripting", Some(d.scripting_backends.join(", ")));
+            show("Packages", Some(d.package_count.to_string()));
+            show("Organization", d.organization.clone());
+            show("Cloud project", d.cloud_project_name.clone());
+            if let Some(sc) = &d.source_control {
+                show("Source control", Some(sc.provider.display_name().to_string()));
+                show("Repository", sc.owner.as_ref().zip(sc.repository.as_ref()).map(|(o, r)| format!("{o}/{r}")));
+                show("Branch", sc.branch.clone());
+                show("Web", sc.web_url.clone());
+            }
+            if let Some(g) = &d.git {
+                show("Last commit", g.last_commit_hash.as_ref().map(|h| {
+                    format!("{h} {} ({})", g.last_commit_subject.clone().unwrap_or_default(),
+                            g.last_commit_author.clone().unwrap_or_default())
+                }));
+                show("Changes", Some(g.changed_files.to_string()));
+                show("Upstream", g.upstream.as_ref().map(|u| {
+                    format!("{u} (ahead {}, behind {})", g.ahead.unwrap_or(0), g.behind.unwrap_or(0))
+                }));
+            }
+            if size {
+                let s = unihub.project_size(path)?;
+                println!("{:<18} {:.2} GB", "Size on disk", s.total as f64 / 1e9);
+                for f in s.folders.iter().take(5) {
+                    println!("  {:<16} {:.2} GB", f.name, f.bytes as f64 / 1e9);
+                }
+            }
         }
         Cmd::Editors => {
             for e in unihub.list_editors() {

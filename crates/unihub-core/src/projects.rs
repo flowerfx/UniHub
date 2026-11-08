@@ -9,8 +9,9 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{UniHubError, Result};
+use crate::error::{Result, UniHubError};
 use crate::paths::path_string;
+use crate::vcs::{self, SourceControl};
 
 /// A project as shown in the UI. Built fresh from disk each time it is listed.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -28,6 +29,8 @@ pub struct Project {
     pub modified_ms: Option<i64>,
     /// False when the folder is missing or no longer looks like a Unity project.
     pub exists: bool,
+    /// Git (GitHub, GitLab, other hosts), Unity Version Control or Perforce, if used.
+    pub source_control: Option<SourceControl>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -170,6 +173,7 @@ fn build_project(path: &str, stored: &StoredProject) -> Project {
         last_opened_ms: stored.last_opened_ms,
         modified_ms: modified_ms(dir),
         exists: is_unity_project(dir),
+        source_control: vcs::detect(dir),
     }
 }
 

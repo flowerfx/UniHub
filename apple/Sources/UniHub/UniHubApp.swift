@@ -14,6 +14,7 @@ struct UniHubApp: App {
                 .task { await model.refreshLocal() }
                 .onAppear { model.applyAppearance() }
         }
+        .defaultSize(width: 1280, height: 800)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Add Project…") { model.isAddingProject = true }

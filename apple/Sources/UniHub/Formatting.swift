@@ -26,6 +26,40 @@ extension Project {
     var versionKey: VersionKey { VersionKey(raw: editorVersion ?? "") }
     var modifiedKey: Int64 { modifiedMs ?? 0 }
     var favoriteKey: Int { isFavorite ? 1 : 0 }
+    var branchKey: String { sourceControl?.branch ?? "" }
+}
+
+extension VcsProvider {
+    var displayName: String {
+        switch self {
+        case .gitHub: "GitHub"
+        case .gitLab: "GitLab"
+        case .git: "Git"
+        case .unityVersionControl: "Unity Version Control"
+        case .perforce: "Perforce"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .gitHub, .gitLab, .git: "arrow.triangle.branch"
+        case .unityVersionControl: "point.3.connected.trianglepath.dotted"
+        case .perforce: "server.rack"
+        }
+    }
+
+    /// "Pull requests" on GitHub, "Merge requests" on GitLab.
+    var reviewsLabel: String { self == .gitLab ? "Merge Requests" : "Pull Requests" }
+}
+
+extension SourceControl {
+    var repositoryName: String? {
+        switch (owner, repository) {
+        case let (o?, r?): "\(o)/\(r)"
+        case let (nil, r?): r
+        default: nil
+        }
+    }
 }
 
 extension UniHubError {
@@ -73,6 +107,11 @@ enum Format {
     static func relative(ms: Int64?) -> String {
         guard let ms, ms > 0 else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        return date.formatted(.relative(presentation: .named))
+    }
+
+    static func relative(iso: String?) -> String {
+        guard let iso, let date = ISO8601DateFormatter().date(from: iso) else { return "" }
         return date.formatted(.relative(presentation: .named))
     }
 

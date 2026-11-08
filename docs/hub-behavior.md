@@ -185,7 +185,41 @@ UniHub follows the ones that apply to it.
 Accounts and Licenses are separate pages in the Hub. Download concurrency is
 `download.maxConcurrentDownloads` in `user-settings.json` (default 2).
 
-## 9. Scope of UniHub
+## 9. Project details and source control
+
+From REA's analysis of the Hub's project model, its locale strings, and the Unity CLI:
+
+- **Details:** each project row has an "Expand project details" arrow (plus "Expand all
+  project details"). The expanded area shows Editor version (with "Change Editor version"),
+  Render pipeline (Built-in / URP / HDRP / SRP), Current platform, Size on disk, Tags,
+  Cloud project and organisation, and the **source control repository**: Provider,
+  Repository, `{provider}` organisation, Current branch, "View on {provider}", "Copy link",
+  "Disconnect from {provider}" and remote repository size.
+- **Project model fields:** `vcsData` (`provider`, `url`, `vcsRoot`,
+  `projectPathInsideRepository`, `hasRemote`, remotes), `vcsProvider`,
+  `vcsConfigurationPath` (`.git/config`), `repositoryName`, `buildTarget`, `size`, `tags`,
+  `cloudProjectId`, `organizationId`/`organizationName`, `renderPipeline`.
+- **Providers:** GitHub, GitLab, Perforce and Unity Version Control. The table can show and
+  sort by the current branch.
+- **Render pipeline:** the Hub reads `m_CustomRenderPipeline` in
+  `ProjectSettings/GraphicsSettings.asset` and the per-quality `customRenderPipeline` in
+  `QualitySettings.asset`. A `{fileID: 0}` reference means Built-in; otherwise the
+  pipeline asset's script tells URP from HDRP.
+- **Current platform:** `m_ActiveBuildTarget` in `Library/EditorUserBuildSettings.asset`,
+  a *binary* Unity serialized file (format 22), which the Hub parses itself.
+- **Unity CLI equivalents:** `unity projects info <path> --json` returns `buildTarget`,
+  `renderPipeline`, `scriptingBackend`, `packages`, `vcsProvider`, `repositoryName` and cloud
+  fields; `unity projects size <path> --json` returns `total` and a per-folder `breakdown`;
+  `unity vcs status <path> --json` returns branch and change counts.
+
+UniHub reads `.git/HEAD` and `.git/config` (and `.plastic/plastic.selector`) itself for
+the table, runs `git` for the last commit, changes and upstream distance, and uses the
+Unity CLI for the build target and size when it is installed. Web links are built only
+for GitHub and GitLab, whose URL layouts are known; credentials in HTTPS remotes are
+stripped before display. UniHub does not implement the Hub's GitHub/GitLab OAuth
+connection ("Disconnect from {provider}").
+
+## 10. Scope of UniHub
 
 In scope: project list (compatible with `projects-v1.json`, read-only), editor discovery,
 release browsing, launching, settings, a CLI, and account, license and tool management

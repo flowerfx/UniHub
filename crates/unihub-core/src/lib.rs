@@ -6,6 +6,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod details;
 pub mod editors;
 mod error;
 mod paths;
@@ -13,6 +14,7 @@ pub mod projects;
 pub mod releases;
 pub mod settings;
 pub mod unity_cli;
+pub mod vcs;
 pub mod version;
 
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use details::{FolderSize, ProjectDetails, ProjectSize};
 pub use editors::Editor;
 pub use error::{Result, UniHubError};
 pub use paths::UniHubPaths;
@@ -27,6 +30,7 @@ pub use projects::Project;
 pub use releases::{Download, Module, Release, ReleasePage, ReleaseStream};
 pub use settings::{Appearance, CliChannel, Settings};
 pub use unity_cli::{Account, AuthStatus, CliInfo, CliUpdate, License, LicenseStatus, Plugin};
+pub use vcs::{GitStatus, SourceControl, VcsProvider};
 
 use projects::ProjectStore;
 
@@ -119,6 +123,20 @@ impl UniHub {
 
     pub fn set_favorite(&self, path: String, favorite: bool) -> Result<()> {
         self.store().update(&path, |p| p.is_favorite = favorite)
+    }
+
+    /// Everything for the details panel: settings, render pipeline, build target,
+    /// cloud project and source control. Runs git and, if installed, the Unity CLI,
+    /// so call it off the main thread.
+    pub fn project_details(&self, path: String) -> Result<ProjectDetails> {
+        self.known_project(&path)?;
+        Ok(details::load(Path::new(&path), self.cli_path().ok().as_deref()))
+    }
+
+    /// Disk usage by folder. Can take several seconds on large projects.
+    pub fn project_size(&self, path: String) -> Result<ProjectSize> {
+        self.known_project(&path)?;
+        Ok(details::size(Path::new(&path), self.cli_path().ok().as_deref()))
     }
 
     /// Adds projects from the official Hub that UniHub does not list yet.
@@ -332,6 +350,13 @@ impl UniHub {
 impl UniHub {
     fn store(&self) -> MutexGuard<'_, ProjectStore> {
         lock(&self.store)
+    }
+
+    fn known_project(&self, path: &str) -> Result<()> {
+        match self.store().get(path) {
+            Some(_) => Ok(()),
+            None => Err(UniHubError::UnknownProject { path: path.to_string() }),
+        }
     }
 
     /// The cached CLI if its binary is still there, otherwise a fresh search.

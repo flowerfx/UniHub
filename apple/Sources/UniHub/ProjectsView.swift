@@ -6,6 +6,9 @@ struct ProjectsView: View {
     @State private var search = ""
     @State private var selection: Set<Project.ID> = []
     @State private var sortOrder = [KeyPathComparator(\Project.modifiedKey, order: .reverse)]
+    /// Project whose details were open, restored on the next launch.
+    /// `-detailsProject <path>` on the command line overrides it.
+    @AppStorage("detailsProject") private var savedDetailsPath = ""
 
     private var rows: [Project] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -15,6 +18,7 @@ struct ProjectsView: View {
                 $0.title.localizedCaseInsensitiveContains(query)
                     || $0.path.localizedCaseInsensitiveContains(query)
                     || ($0.editorVersion ?? "").contains(query)
+                    || $0.branchKey.localizedCaseInsensitiveContains(query)
             }
         return filtered.sorted(using: sortOrder)
     }
@@ -52,10 +56,45 @@ struct ProjectsView: View {
             }
             .width(min: 110, ideal: 130)
 
+            TableColumn("Source Control", value: \.branchKey) { project in
+                SourceControlCell(project: project)
+            }
+            .width(min: 130, ideal: 190)
+
             TableColumn("Modified", value: \.modifiedKey) { project in
                 Text(Format.relative(ms: project.modifiedMs)).foregroundStyle(.secondary)
             }
-            .width(min: 100, ideal: 120)
+            .width(min: 90, ideal: 110)
+
+            // The arrow that opens the project's details, like the Hub's expand button.
+            TableColumn("") { project in
+                DetailsButton(model: model, project: project)
+            }
+            .width(28)
+        }
+        .inspector(isPresented: $model.showDetails) {
+            ProjectDetailsView(model: model)
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
+        }
+        .onChange(of: model.projects.count) { _, _ in
+            // Reopen the saved panel once the project list has loaded.
+            if !model.showDetails, !savedDetailsPath.isEmpty,
+               let project = model.projects.first(where: { $0.path == savedDetailsPath }) {
+                selection = [project.id]
+                model.showDetails(for: project)
+            }
+        }
+        .onChange(of: model.showDetails) { _, open in
+            savedDetailsPath = open ? (model.detailsPath ?? "") : ""
+        }
+        .onChange(of: model.detailsPath) { _, path in
+            if model.showDetails { savedDetailsPath = path ?? "" }
+        }
+        .onChange(of: selection) { _, ids in
+            // While the panel is open it follows the selected row.
+            if model.showDetails, ids.count == 1, let project = model.projects.first(where: { ids.contains($0.id) }) {
+                model.showDetails(for: project)
+            }
         }
         .contextMenu(forSelectionType: Project.ID.self) { ids in
             if let project = model.projects.first(where: { ids.contains($0.id) }), ids.count == 1 {
@@ -89,9 +128,20 @@ struct ProjectsView: View {
                 .help("Add projects listed in the official Hub")
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     Task { await model.refreshLocal() }
+                    if model.showDetails { model.reloadDetails() }
                 }
                 Button("Add", systemImage: "plus") { model.isAddingProject = true }
                     .help("Add an existing project folder")
+                Button("Details", systemImage: "sidebar.right") {
+                    if model.showDetails {
+                        model.showDetails = false
+                    } else if let project = model.projects.first(where: { selection.contains($0.id) }) {
+                        model.showDetails(for: project)
+                    } else {
+                        model.showDetails = true
+                    }
+                }
+                .help("Show or hide project details")
             }
         }
         .fileImporter(isPresented: $model.isAddingProject, allowedContentTypes: [.folder]) { result in
@@ -133,6 +183,44 @@ private struct EditorVersionCell: View {
     }
 }
 
+private struct SourceControlCell: View {
+    let project: Project
+
+    var body: some View {
+        if let sc = project.sourceControl {
+            HStack(spacing: 6) {
+                Image(systemName: sc.provider.symbol)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(sc.branch ?? "—").lineLimit(1).truncationMode(.middle)
+                    Text(sc.provider.displayName).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .help(sc.repositoryName.map { "\(sc.provider.displayName): \($0)" } ?? sc.provider.displayName)
+        } else {
+            Text("—").foregroundStyle(.tertiary)
+        }
+    }
+}
+
+private struct DetailsButton: View {
+    let model: AppModel
+    let project: Project
+
+    var body: some View {
+        let isOpen = model.showDetails && model.detailsPath == project.path
+        Button {
+            model.toggleDetails(for: project)
+        } label: {
+            Image(systemName: isOpen ? "chevron.left.circle.fill" : "chevron.right.circle")
+                .font(.title3)
+                .foregroundStyle(isOpen ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain)
+        .help(isOpen ? "Hide project details" : "Show project details")
+    }
+}
+
 private struct ProjectMenu: View {
     // Passed explicitly: table cells and context menus do not inherit the environment.
     let model: AppModel
@@ -148,8 +236,14 @@ private struct ProjectMenu: View {
         }
         .disabled(!project.exists || model.editors.isEmpty)
         Divider()
+        Button("Show Details") { model.showDetails(for: project) }
         Button("Show in Finder") { model.revealInFinder(project.path) }
             .disabled(!project.exists)
+        if let sc = project.sourceControl, let web = sc.webUrl {
+            Divider()
+            Button("View on \(sc.provider.displayName)") { model.openURL(web) }
+            Button("Copy Repository Link") { model.copyToPasteboard(web) }
+        }
         Button(project.isFavorite ? "Remove from Favorites" : "Add to Favorites") {
             Task { await model.toggleFavorite(project) }
         }

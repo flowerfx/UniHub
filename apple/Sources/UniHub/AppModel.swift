@@ -32,6 +32,14 @@ final class AppModel {
     var cliBusy: String?  // what the CLI section is doing, e.g. "Installing…"
     var busyPlugins: Set<String> = []
 
+    // Project details panel
+    var showDetails = false
+    private(set) var detailsPath: String?
+    private(set) var details: ProjectDetails?
+    private(set) var detailsSize: ProjectSize?
+    private(set) var isLoadingDetails = false
+    private(set) var isLoadingSize = false
+
     var isAddingProject = false
     var projectPendingRemoval: Project?
     var errorMessage: String?
@@ -110,6 +118,59 @@ final class AppModel {
             if settings.hideOnProjectOpen { NSApp.hide(nil) }
             await refreshLocal()
         }
+    }
+
+    var detailsProject: Project? {
+        detailsPath.flatMap { path in projects.first { $0.path == path } }
+    }
+
+    /// The row's arrow button: opens the panel for this project, or closes it if it
+    /// already shows this project.
+    func toggleDetails(for project: Project) {
+        if showDetails && detailsPath == project.path {
+            showDetails = false
+        } else {
+            showDetails(for: project)
+        }
+    }
+
+    func showDetails(for project: Project) {
+        showDetails = true
+        guard detailsPath != project.path || details == nil else { return }
+        detailsPath = project.path
+        details = nil
+        detailsSize = nil
+        Task { await loadDetails(path: project.path) }
+    }
+
+    func reloadDetails() {
+        guard let path = detailsPath else { return }
+        details = nil
+        detailsSize = nil
+        Task { await loadDetails(path: path) }
+    }
+
+    private func loadDetails(path: String) async {
+        guard let unihub else { return }
+        isLoadingDetails = true
+        let result = await Task.detached { Result { try unihub.projectDetails(path: path) } }.value
+        guard detailsPath == path else { return }  // another project was picked meanwhile
+        isLoadingDetails = false
+        switch result {
+        case .success(let d): details = d
+        case .failure(let error): errorMessage = describe(error)
+        }
+
+        isLoadingSize = true
+        let size = try? await Task.detached { try unihub.projectSize(path: path) }.value
+        guard detailsPath == path else { return }
+        detailsSize = size
+        isLoadingSize = false
+    }
+
+    func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     func revealInFinder(_ path: String) {
