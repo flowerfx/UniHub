@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Background gradients -->
+    <linearGradient id="background" x1="150" y1="130" x2="875" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#18246D"/>
+      <stop offset="0.48" stop-color="#7139B8"/>
+      <stop offset="1" stop-color="#087F86"/>
+    </linearGradient>
+    <radialGradient id="backgroundGlow" cx="0" cy="0" r="1" gradientTransform="translate(512 462) rotate(90) scale(440)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B77AFF" stop-opacity="0.44"/>
+      <stop offset="0.66" stop-color="#5D36A7" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#081C58" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="platformTop" x1="315" y1="500" x2="718" y2="730" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#99F4EB"/>
+      <stop offset="0.48" stop-color="#54BCD2"/>
+      <stop offset="1" stop-color="#7775E9"/>
+    </linearGradient>
+    <linearGradient id="platformEdge" x1="512" y1="620" x2="512" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#337AAB"/>
+      <stop offset="1" stop-color="#25427D"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="335" y1="485" x2="702" y2="704" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D5FFF6"/>
+      <stop offset="0.52" stop-color="#62E1D5"/>
+      <stop offset="1" stop-color="#86A0FF"/>
+    </linearGradient>
+    <linearGradient id="connector" x1="320" y1="450" x2="747" y2="706" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A6F8ED"/>
+      <stop offset="1" stop-color="#70A3F4"/>
+    </linearGradient>
+    <linearGradient id="satellite" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#D7FFF5"/>
+      <stop offset="0.46" stop-color="#76E5D4"/>
+      <stop offset="1" stop-color="#4B7CDA"/>
+    </linearGradient>
+    <linearGradient id="centralNode" x1="425" y1="350" x2="605" y2="535" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF3A6"/>
+      <stop offset="0.48" stop-color="#FFB447"/>
+      <stop offset="1" stop-color="#F45B64"/>
+    </linearGradient>
+    <linearGradient id="centralEdge" x1="512" y1="455" x2="512" y2="585" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E86855"/>
+      <stop offset="1" stop-color="#A52F66"/>
+    </linearGradient>
+
+    <!-- Soft shadows and glows -->
+    <filter id="bodyShadow" x="40" y="40" width="944" height="964" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18" result="blur"/>
+      <feOffset dy="14" result="offsetBlur"/>
+      <!-- 30% black: a soft lift rather than a heavy band -->
+      <feColorMatrix in="offsetBlur" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0.05  0 0 0 0.3 0" result="softShadow"/>
+      <feMerge>
+        <feMergeNode in="softShadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="platformShadow" x="220" y="490" width="590" height="330" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <filter id="nodeGlow" x="330" y="275" width="365" height="365" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+    <filter id="nodeShadow" x="365" y="330" width="295" height="285" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12" result="blur"/>
+      <feOffset dy="16" result="offsetBlur"/>
+      <feColorMatrix in="offsetBlur" type="matrix" values="0 0 0 0 0.03  0 0 0 0 0.05  0 0 0 0 0.2  0 0 0 0.45 0" result="softShadow"/>
+      <feMerge>
+        <feMergeNode in="softShadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- App icon body -->
+  <g filter="url(#bodyShadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#background)"/>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#backgroundGlow)"/>
+    <path d="M147 327C251 173 420 116 600 137C732 152 843 219 902 328V285C902 183 821 102 719 102H305C203 102 122 183 122 285V374C129 358 137 342 147 327Z" fill="#FFFFFF" opacity="0.08"/>
+  </g>
+
+  <!-- Platform shadow -->
+  <ellipse cx="512" cy="693" rx="258" ry="84" fill="#09264F" opacity="0.55" filter="url(#platformShadow)"/>
+
+  <!-- Stacked isometric platform -->
+  <path d="M512 523L755 651V713L512 842L269 713V651L512 523Z" fill="url(#platformEdge)"/>
+  <path d="M269 651L512 780L755 651L512 523L269 651Z" fill="url(#platformTop)"/>
+  <path d="M512 780L755 651V713L512 842V780Z" fill="#263B78" opacity="0.5"/>
+  <path d="M269 651L512 780V842L269 713V651Z" fill="#235B85" opacity="0.58"/>
+
+  <!-- Orbital ring -->
+  <ellipse cx="512" cy="620" rx="186" ry="103" fill="#183D75" opacity="0.72"/>
+  <path d="M512 500C624 500 715 550 715 612C715 674 624 724 512 724C400 724 309 674 309 612C309 550 400 500 512 500ZM512 539C424 539 353 572 353 612C353 652 424 685 512 685C600 685 671 652 671 612C671 572 600 539 512 539Z" fill="url(#ring)"/>
+  <ellipse cx="512" cy="605" rx="150" ry="72" fill="#173C75" opacity="0.88"/>
+
+  <!-- Chunky hub connectors -->
+  <g fill="none" stroke="url(#connector)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M459 543L357 472L280 489"/>
+    <path d="M565 543L661 465L748 470"/>
+    <path d="M428 621L336 660L278 637"/>
+    <path d="M596 621L682 667L751 641"/>
+  </g>
+  <g fill="none" stroke="#E6FFF8" stroke-width="9" stroke-linecap="round" opacity="0.48">
+    <path d="M459 538L357 467L280 484"/>
+    <path d="M565 538L661 460L748 465"/>
+    <path d="M428 616L336 655L278 632"/>
+    <path d="M596 616L682 662L751 636"/>
+  </g>
+
+  <!-- Satellite nodes -->
+  <g>
+    <ellipse cx="274" cy="505" rx="71" ry="42" fill="#17356D" opacity="0.62"/>
+    <circle cx="274" cy="473" r="57" fill="url(#satellite)"/>
+    <circle cx="258" cy="454" r="17" fill="#FFFFFF" opacity="0.55"/>
+
+    <ellipse cx="753" cy="486" rx="69" ry="40" fill="#17356D" opacity="0.62"/>
+    <circle cx="753" cy="455" r="55" fill="url(#satellite)"/>
+    <circle cx="738" cy="437" r="16" fill="#FFFFFF" opacity="0.55"/>
+
+    <ellipse cx="274" cy="668" rx="65" ry="38" fill="#17356D" opacity="0.66"/>
+    <circle cx="274" cy="638" r="52" fill="url(#satellite)"/>
+    <circle cx="260" cy="621" r="15" fill="#FFFFFF" opacity="0.52"/>
+
+    <ellipse cx="755" cy="673" rx="67" ry="39" fill="#17356D" opacity="0.66"/>
+    <circle cx="755" cy="642" r="54" fill="url(#satellite)"/>
+    <circle cx="740" cy="624" r="16" fill="#FFFFFF" opacity="0.52"/>
+  </g>
+
+  <!-- Central glow -->
+  <circle cx="512" cy="455" r="132" fill="#FFB54A" opacity="0.35" filter="url(#nodeGlow)"/>
+
+  <!-- Warm central node -->
+  <g filter="url(#nodeShadow)">
+    <ellipse cx="512" cy="530" rx="94" ry="55" fill="url(#centralEdge)"/>
+    <circle cx="512" cy="447" r="104" fill="url(#centralNode)"/>
+    <ellipse cx="482" cy="414" rx="38" ry="29" fill="#FFFFFF" opacity="0.5"/>
+    <ellipse cx="512" cy="455" rx="74" ry="76" fill="#FFCD64" opacity="0.13"/>
+  </g>
+
+</svg>
