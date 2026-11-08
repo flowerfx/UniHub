@@ -126,6 +126,10 @@ extension CleanKind {
 
 extension Plugin: Identifiable {}
 
+extension AppUpdate: Identifiable {
+    public var id: String { version }
+}
+
 extension Account: Identifiable {}
 
 extension AuthStatus {

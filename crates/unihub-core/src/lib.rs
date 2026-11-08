@@ -17,6 +17,7 @@ pub mod projects;
 pub mod releases;
 pub mod settings;
 pub mod unity_cli;
+pub mod updates;
 pub mod vcs;
 pub mod version;
 
@@ -34,6 +35,7 @@ pub use projects::Project;
 pub use jobs::{Job, JobKind, JobState};
 pub use releases::{Download, LicenseTerms, Module, ModuleKind, Release, ReleasePage, ReleaseStream};
 pub use settings::{Appearance, CliChannel, Settings};
+pub use updates::AppUpdate;
 pub use unity_cli::{Account, AuthStatus, CliInfo, CliUpdate, License, LicenseStatus, Plugin};
 pub use vcs::{GitStatus, SourceControl, VcsProvider};
 
@@ -92,6 +94,24 @@ impl UniHub {
 
     pub fn paths(&self) -> UniHubPaths {
         self.paths.clone()
+    }
+
+    // ---- UniHub updates -----------------------------------------------------------
+
+    /// UniHub's version (the core and the app are built and released together).
+    pub fn app_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    /// The latest UniHub release on GitHub when it is newer than this build, else `None`.
+    pub fn check_for_update(&self) -> Result<Option<AppUpdate>> {
+        updates::check(&self.http, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Downloads `update`, checks its SHA-256 and the app inside, and puts it in place of
+    /// the app at `app_path` (the running `UniHub.app`). The caller relaunches.
+    pub fn install_update(&self, update: AppUpdate, app_path: String) -> Result<()> {
+        updates::install(&self.http, &update, Path::new(&app_path), &self.paths.data_dir().join("tmp/update"))
     }
 
     // ---- Settings -----------------------------------------------------------------

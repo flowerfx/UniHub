@@ -43,6 +43,15 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Check GitHub for a newer UniHub; with --install, update the app.
+    Update {
+        /// Download, verify and install the update over the app.
+        #[arg(long)]
+        install: bool,
+        /// The app to update.
+        #[arg(long, default_value = "/Applications/UniHub.app")]
+        app: String,
+    },
     /// List installed editors.
     Editors,
     /// List editor releases for macOS (Apple Silicon, or Intel for older versions).
@@ -279,6 +288,19 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
                 eprintln!("could not remove {f}");
             }
         }
+        Cmd::Update { install, app } => match unihub.check_for_update()? {
+            None => println!("UniHub {} is the latest version", unihub.app_version()),
+            Some(update) => {
+                println!("UniHub {} is available (you have {})", update.version, update.current_version);
+                println!("{}", update.page_url);
+                if install {
+                    unihub.install_update(update, app.clone())?;
+                    println!("updated {app}; reopen it to use the new version");
+                } else {
+                    println!("run `unihub update --install` to install it");
+                }
+            }
+        },
         Cmd::Editors => {
             for e in unihub.list_editors() {
                 println!("{:<14} {:<10} {}", e.version, e.architecture, e.app_path);

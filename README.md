@@ -44,9 +44,13 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
 - **Tools:** install, update or uninstall the Unity CLI, and install, update or remove the
   tools it manages (Unity Version Control `cm`, Unity Gaming Services CLI, and more).
 - **Settings (⌘,):** Accounts, Licenses, Appearance, Projects, Installs, Unity CLI, Advanced.
+- **Updates:** once a day (or UniHub → Check for Updates…) UniHub looks for a newer release
+  on [GitHub](https://github.com/flowerfx/UniHub/releases), shows its notes, and on
+  "Install and Relaunch" downloads the DMG, checks its SHA-256, checks the app inside and
+  replaces itself. Turn the daily check off in Settings → Advanced.
 - **CLI:** `unihub projects | editors | releases | install | uninstall | modules |
   module-add | module-remove | open | add | remove | import | info | clean | account |
-  login | logout | tools | tool-install | tool-remove | cli | cli-install | settings`.
+  login | logout | tools | tool-install | tool-remove | cli | cli-install | settings | update`.
 
 ### How sign-in and installs work
 
@@ -79,6 +83,24 @@ cd apple && swift run          # or open apple/Package.swift in Xcode
 cargo test                     # core tests
 cargo run -p unihub-cli -- projects
 ```
+
+## Releasing
+
+1. Bump `version` in `Cargo.toml` (`[workspace.package]`); the app takes its version from it.
+2. Build the DMG:
+
+   ```bash
+   ./scripts/make-dmg.sh          # → release/UniHub-<version>.dmg and .dmg.sha256
+   ```
+
+3. Create a GitHub release tagged `v<version>` and attach **both** files. Installed copies of
+   UniHub find it through `api.github.com/repos/flowerfx/UniHub/releases/latest` and refuse a
+   DMG that has no `.sha256` next to it. Drafts and pre-releases are ignored.
+
+`release/` is not committed. The app is ad-hoc signed, not notarized: the first time someone
+opens a DMG downloaded in a browser, macOS asks them to allow it in System Settings →
+Privacy & Security. Updates installed by UniHub itself are not quarantined, so they open
+directly. `unihub update [--install]` checks for, or installs, an update from the terminal.
 
 After editing `apple/Resources/AppIcon.svg`, regenerate the app icon (the `.icns` is committed,
 so normal builds don't need this step):
@@ -115,6 +137,7 @@ crates/unihub-core     Rust core, exported to Swift with UniFFI
   clean.rs             Clean Up: git-ignored or generated files, open-in-Unity check
   modules.rs           installed editors' modules (modules.json, or a folder scan)
   jobs.rs              background editor/module installs through the Unity CLI, with progress
+  updates.rs           UniHub's own updates from GitHub releases
   unity_cli.rs         sign-in, licenses and tools through the official Unity CLI
 crates/unihub-cli      `unihub` command-line tool
 crates/uniffi-bindgen  generates the Swift bindings

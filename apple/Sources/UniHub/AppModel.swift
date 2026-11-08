@@ -61,6 +61,14 @@ final class AppModel {
     /// The open "Clean Up" sheet, if any.
     var cleanup: Cleanup?
 
+    // UniHub updates
+    /// A newer UniHub release; its sheet shows while this is set.
+    var availableUpdate: AppUpdate?
+    private(set) var isCheckingForUpdate = false
+    private(set) var isInstallingUpdate = false
+    /// Result of a manual check that found nothing ("UniHub 0.1.0 is up to date").
+    var updateCheckMessage: String?
+
     var isAddingProject = false
     var projectPendingRemoval: Project?
     var errorMessage: String?
@@ -283,6 +291,65 @@ final class AppModel {
         case .failure(let error):
             releaseError = describe(error)
         }
+    }
+
+    // MARK: UniHub updates
+
+    var appVersion: String { unihub?.appVersion() ?? "" }
+
+    /// Checks GitHub for a newer UniHub. A manual check also reports "up to date" and errors;
+    /// the automatic one stays quiet unless it finds an update.
+    func checkForUpdate(manual: Bool) async {
+        guard let unihub, !isCheckingForUpdate else { return }
+        isCheckingForUpdate = true
+        defer { isCheckingForUpdate = false }
+        let result = await Task.detached { Result { try unihub.checkForUpdate() } }.value
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastUpdateCheckKey)
+        switch result {
+        case .success(let update?):
+            availableUpdate = update
+        case .success(nil):
+            if manual { updateCheckMessage = "UniHub \(appVersion) is the latest version." }
+        case .failure(let error):
+            if manual { updateCheckMessage = "Could not check for updates.\n\(describe(error))" }
+        }
+    }
+
+    /// The automatic check at launch: at most once a day, unless turned off in Settings.
+    func checkForUpdateIfDue() async {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true else { return }
+        let last = defaults.double(forKey: Self.lastUpdateCheckKey)
+        guard Date().timeIntervalSince1970 - last > 24 * 60 * 60 else { return }
+        await checkForUpdate(manual: false)
+    }
+
+    static let autoUpdateKey = "checkForUpdatesAutomatically"
+    private static let lastUpdateCheckKey = "lastUpdateCheck"
+
+    /// Downloads and installs the update, then relaunches UniHub.
+    func installUpdate(_ update: AppUpdate) async {
+        guard let unihub, !isInstallingUpdate else { return }
+        isInstallingUpdate = true
+        let appPath = Bundle.main.bundlePath
+        let result = await Task.detached { Result { try unihub.installUpdate(update: update, appPath: appPath) } }.value
+        isInstallingUpdate = false
+        switch result {
+        case .success:
+            relaunch(appPath)
+        case .failure(let error):
+            availableUpdate = nil
+            errorMessage = "The update could not be installed.\n\(describe(error))"
+        }
+    }
+
+    /// Opens the (new) app once this process has quit.
+    private func relaunch(_ appPath: String) {
+        let task = Process()
+        task.executableURL = URL(filePath: "/bin/sh")
+        task.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", appPath]
+        try? task.run()
+        NSApp.terminate(nil)
     }
 
     // MARK: Installing editors and modules

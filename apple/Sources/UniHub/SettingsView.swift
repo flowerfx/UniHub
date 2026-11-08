@@ -431,11 +431,23 @@ private struct CliPane: View {
 private struct AdvancedPane: View {
     @Environment(AppModel.self) private var model
     @State private var confirmReset = false
+    @AppStorage(AppModel.autoUpdateKey) private var autoUpdate = true
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Version", value: Bundle.main.shortVersion)
+                LabeledContent("Version") {
+                    HStack {
+                        Text(Bundle.main.shortVersion)
+                        Button("Check for Updates") { Task { await model.checkForUpdate(manual: true) } }
+                            .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)
+                        if model.isCheckingForUpdate { ProgressView().controlSize(.small) }
+                    }
+                }
+                Toggle("Check for updates automatically", isOn: $autoUpdate)
+                Text("Once a day, UniHub looks for a newer release on GitHub (github.com/flowerfx/UniHub/releases) and offers to install it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if let dir = model.dataDirectory {
                     LabeledContent("Data folder") {
                         HStack {

@@ -28,6 +28,8 @@ DerivedData/
 
 # --- Build output -------------------------------------------------------------
 /dist
+# DMGs from scripts/make-dmg.sh: published as GitHub release assets, not committed
+/release
 
 # --- Editors and OS -------------------------------------------------------------
 .DS_Store

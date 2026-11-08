@@ -11,11 +11,18 @@ struct UniHubApp: App {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 520)
-                .task { await model.refreshLocal() }
+                .task {
+                    await model.refreshLocal()
+                    await model.checkForUpdateIfDue()
+                }
                 .onAppear { model.applyAppearance() }
         }
         .defaultSize(width: 1280, height: 800)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Task { await model.checkForUpdate(manual: true) } }
+                    .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)
+            }
             CommandGroup(after: .newItem) {
                 Button("Add Project…") { model.isAddingProject = true }
                     .keyboardShortcut("o")

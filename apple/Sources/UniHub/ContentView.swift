@@ -47,6 +47,16 @@ struct ContentView: View {
         }
         .background(TitlebarBrand())
         .sheet(item: $model.cleanup) { _ in CleanupView(model: model) }
+        .sheet(item: $model.availableUpdate) { update in UpdateSheet(model: model, update: update) }
+        .alert(
+            "Check for Updates",
+            isPresented: Binding(
+                get: { model.updateCheckMessage != nil },
+                set: { if !$0 { model.updateCheckMessage = nil } }
+            ),
+            actions: { Button("OK", role: .cancel) {} },
+            message: { Text(model.updateCheckMessage ?? "") }
+        )
         .task {
             // Development aid: `-openSettings YES` opens Settings at launch.
             if UserDefaults.standard.bool(forKey: "openSettings") { openSettings() }
