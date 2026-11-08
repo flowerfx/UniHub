@@ -3,6 +3,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# rustup installs cargo in ~/.cargo/bin, which shells that skip the user's profile
+# (scripts run from an app, for example) do not have on their PATH.
+if ! command -v cargo >/dev/null 2>&1; then
+  if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+  else
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
+fi
+command -v cargo >/dev/null 2>&1 || {
+  echo "error: cargo not found. Install Rust from https://rustup.rs, then: rustup target add aarch64-apple-darwin" >&2
+  exit 1
+}
+
 PROFILE="${PROFILE:-release}"
 FLAG=$([ "$PROFILE" = release ] && echo --release || true)
 TARGET=aarch64-apple-darwin
