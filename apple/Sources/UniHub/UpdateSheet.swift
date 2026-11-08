@@ -31,6 +31,15 @@ struct UpdateSheet: View {
             }
             .frame(maxHeight: .infinity)
             Divider()
+            if let error = model.updateError {
+                Label("The update could not be installed: \(error)", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+            }
             HStack {
                 if let url = URL(string: update.pageUrl), !update.pageUrl.isEmpty {
                     Link("View on GitHub", destination: url)
@@ -40,10 +49,15 @@ struct UpdateSheet: View {
                     ProgressView().controlSize(.small)
                     Text("Downloading and installing…").foregroundStyle(.secondary)
                 }
-                Button("Later") { dismiss() }
+                Button("Later") {
+                    model.updateError = nil
+                    dismiss()
+                }
                     .keyboardShortcut(.cancelAction)
                     .disabled(model.isInstallingUpdate)
-                Button("Install and Relaunch") { Task { await model.installUpdate(update) } }
+                Button(model.updateError == nil ? "Install and Relaunch" : "Try Again") {
+                    Task { await model.installUpdate(update) }
+                }
                     .keyboardShortcut(.defaultAction)
                     .disabled(model.isInstallingUpdate || update.checksumUrl == nil)
                     .help(update.checksumUrl == nil

@@ -68,6 +68,8 @@ final class AppModel {
     private(set) var isInstallingUpdate = false
     /// Result of a manual check that found nothing ("UniHub 0.1.0 is up to date").
     var updateCheckMessage: String?
+    /// Why the last install failed; shown in the update sheet.
+    var updateError: String?
 
     var isAddingProject = false
     var projectPendingRemoval: Project?
@@ -337,25 +339,39 @@ final class AppModel {
     func installUpdate(_ update: AppUpdate) async {
         guard let unihub, !isInstallingUpdate else { return }
         isInstallingUpdate = true
+        updateError = nil
         let appPath = Bundle.main.bundlePath
         let result = await Task.detached { Result { try unihub.installUpdate(update: update, appPath: appPath) } }.value
-        isInstallingUpdate = false
         switch result {
         case .success:
+            // Close the sheet first: AppKit does not quit while a sheet is open.
+            availableUpdate = nil
             relaunch(appPath)
         case .failure(let error):
-            availableUpdate = nil
-            errorMessage = "The update could not be installed.\n\(describe(error))"
+            // Shown in the sheet, which stays open (an alert would be lost while it closes).
+            isInstallingUpdate = false
+            updateError = describe(error)
         }
     }
 
-    /// Opens the (new) app once this process has quit.
+    /// Quits and opens the updated app once this process has really exited.
     private func relaunch(_ appPath: String) {
+        let pid = String(ProcessInfo.processInfo.processIdentifier)
         let task = Process()
         task.executableURL = URL(filePath: "/bin/sh")
-        task.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", appPath]
+        // Waits up to 30 s for this process to exit; `open` on a still-running app would only
+        // bring the old one to the front.
+        task.arguments = [
+            "-c",
+            "i=0; while kill -0 \"$1\" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; /usr/bin/open \"$0\"",
+            appPath, pid,
+        ]
         try? task.run()
-        NSApp.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            NSApp.terminate(nil)
+            // If something still keeps the app open, quit anyway: the update is installed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+        }
     }
 
     // MARK: Installing editors and modules

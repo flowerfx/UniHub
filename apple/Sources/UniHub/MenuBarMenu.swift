@@ -41,19 +41,41 @@ struct MenuBarMenu: View {
             Button("Unity Manual") { model.openURL("https://docs.unity3d.com/Manual/index.html") }
             Button("Unity Discussions") { model.openURL("https://discussions.unity.com") }
             Divider()
-            Button("Check for Updates…") {
-                showMainWindow()  // the update sheet opens on the main window
-                Task { await model.checkForUpdate(manual: true) }
-            }
-            .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)
+            CheckForUpdatesButton(model: model)
         }
-        Button("Open UniHub") { showMainWindow() }
+        Button("Open UniHub") { showMainWindow(openWindow) }
         Button("Quit UniHub") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
+}
 
-    private func showMainWindow() {
-        openWindow(id: Self.mainWindowID)
-        NSApp.activate()
+/// Brings the main window to the front, or opens it when it was closed.
+@MainActor
+func showMainWindow(_ openWindow: OpenWindowAction) {
+    let windows = NSApp.windows.filter { window in
+        !(window is NSPanel)
+            && window.identifier?.rawValue.hasPrefix(MenuBarMenu.mainWindowID) == true
+    }
+    if let window = windows.first {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    } else {
+        openWindow(id: MenuBarMenu.mainWindowID)
+    }
+    NSApp.activate()
+}
+
+/// "Check for Updates…" (app menu and menu bar): the result shows on the main window, so
+/// it is opened first.
+struct CheckForUpdatesButton: View {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Check for Updates…") {
+            showMainWindow(openWindow)
+            Task { await model.checkForUpdate(manual: true) }
+        }
+        .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)
     }
 }

@@ -8,8 +8,10 @@ struct UniHubApp: App {
     @AppStorage(MenuBarMenu.showKey) private var showMenuBarIcon = true
 
     var body: some Scene {
-        // One main window: "Open UniHub" in the menu bar brings it back instead of adding more.
-        Window("UniHub", id: MenuBarMenu.mainWindowID) {
+        // A window group (not `Window`) so a window always opens at launch, even if it was
+        // closed when UniHub quit. "New Window" is removed below and "Open UniHub" focuses the
+        // existing window, so there is still one.
+        WindowGroup("UniHub", id: MenuBarMenu.mainWindowID) {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 520)
@@ -22,10 +24,9 @@ struct UniHubApp: App {
         .defaultSize(width: 1280, height: 800)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates…") { Task { await model.checkForUpdate(manual: true) } }
-                    .disabled(model.isCheckingForUpdate || model.isInstallingUpdate)
+                CheckForUpdatesButton(model: model)
             }
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .newItem) {
                 Button("Add Project…") { model.isAddingProject = true }
                     .keyboardShortcut("o")
                 Button("Refresh") { Task { await model.refreshLocal() } }
