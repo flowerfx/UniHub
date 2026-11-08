@@ -1,0 +1,387 @@
+//! UniHub core: project list, editor discovery, release catalogue, launching,
+//! settings, and Unity account / tool management through the official Unity CLI.
+//!
+//! Exposed to Swift through UniFFI as the `UniHub` object. The same API is used by the
+//! `unihub` command-line tool.
+
+uniffi::setup_scaffolding!();
+
+pub mod editors;
+mod error;
+mod paths;
+pub mod projects;
+pub mod releases;
+pub mod settings;
+pub mod unity_cli;
+pub mod version;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use editors::Editor;
+pub use error::{Result, UniHubError};
+pub use paths::UniHubPaths;
+pub use projects::Project;
+pub use releases::{Download, Module, Release, ReleasePage, ReleaseStream};
+pub use settings::{Appearance, CliChannel, Settings};
+pub use unity_cli::{Account, AuthStatus, CliInfo, CliUpdate, License, LicenseStatus, Plugin};
+
+use projects::ProjectStore;
+
+/// Official, documented installer for the Unity CLI (docs.unity3d.com/hub/unity-cli).
+pub const CLI_INSTALL_SCRIPT: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.sh";
+
+#[derive(uniffi::Object)]
+pub struct UniHub {
+    paths: UniHubPaths,
+    store: Mutex<ProjectStore>,
+    settings: Mutex<Settings>,
+    http: reqwest::blocking::Client,
+    sign_in: unity_cli::SignIn,
+    /// Last CLI found by `unity_cli()`. Finding it runs the binary (~1 s), so the
+    /// account and tool calls reuse this.
+    cli: Mutex<Option<CliInfo>>,
+}
+
+#[uniffi::export]
+impl UniHub {
+    /// Uses the standard macOS locations.
+    #[uniffi::constructor]
+    pub fn new() -> Result<Arc<Self>> {
+        Self::with_paths(UniHubPaths::detect())
+    }
+
+    #[uniffi::constructor]
+    pub fn with_paths(paths: UniHubPaths) -> Result<Arc<Self>> {
+        let settings = Settings::load(&paths.data_dir())?;
+        let hub_dir = paths.hub_data_dir();
+        let mut store = ProjectStore::open(&paths.data_dir(), hub_dir.as_deref())?;
+        if settings.sync_hub_projects_on_launch {
+            if let Some(hub) = &hub_dir {
+                // A broken Hub file should not stop UniHub from starting.
+                let _ = store.import_from_hub(hub);
+            }
+        }
+        let http = reqwest::blocking::Client::builder()
+            .user_agent(concat!("UniHub/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        Ok(Arc::new(Self {
+            paths,
+            store: Mutex::new(store),
+            settings: Mutex::new(settings),
+            http,
+            sign_in: unity_cli::SignIn::default(),
+            cli: Mutex::new(None),
+        }))
+    }
+
+    pub fn paths(&self) -> UniHubPaths {
+        self.paths.clone()
+    }
+
+    // ---- Settings -----------------------------------------------------------------
+
+    pub fn settings(&self) -> Settings {
+        lock(&self.settings).clone()
+    }
+
+    /// Saves new settings and returns them as stored (blank paths cleared, limits applied).
+    pub fn update_settings(&self, settings: Settings) -> Result<Settings> {
+        let settings = settings.cleaned();
+        settings.save(&self.paths.data_dir())?;
+        let previous = std::mem::replace(&mut *lock(&self.settings), settings.clone());
+        if previous.unity_cli_path != settings.unity_cli_path {
+            *lock(&self.cli) = None;
+        }
+        Ok(settings)
+    }
+
+    pub fn reset_settings(&self) -> Result<Settings> {
+        self.update_settings(Settings::default())
+    }
+
+    // ---- Projects -----------------------------------------------------------------
+
+    pub fn list_projects(&self) -> Vec<Project> {
+        self.store().list()
+    }
+
+    pub fn add_project(&self, path: String) -> Result<Project> {
+        self.store().add(&path)
+    }
+
+    pub fn remove_project(&self, path: String) -> Result<()> {
+        self.store().remove(&path)
+    }
+
+    pub fn set_favorite(&self, path: String, favorite: bool) -> Result<()> {
+        self.store().update(&path, |p| p.is_favorite = favorite)
+    }
+
+    /// Adds projects from the official Hub that UniHub does not list yet.
+    pub fn import_from_hub(&self) -> Result<u32> {
+        match self.paths.hub_data_dir() {
+            Some(hub) => self.store().import_from_hub(&hub),
+            None => Ok(0),
+        }
+    }
+
+    // ---- Editors ------------------------------------------------------------------
+
+    pub fn list_editors(&self) -> Vec<Editor> {
+        editors::discover(&self.editor_search_paths())
+    }
+
+    /// The folder new editors go into.
+    pub fn editor_install_dir(&self) -> String {
+        lock(&self.settings)
+            .editor_install_dir
+            .clone()
+            .unwrap_or_else(|| paths::DEFAULT_EDITOR_ROOT.to_string())
+    }
+
+    /// Opens a project in an editor. With no `editor_version`, uses the version the
+    /// project was last saved with.
+    pub fn open_project(&self, path: String, editor_version: Option<String>) -> Result<()> {
+        let project = self
+            .store()
+            .get(&path)
+            .ok_or_else(|| UniHubError::UnknownProject { path: path.clone() })?;
+        if !project.exists {
+            return Err(UniHubError::NotAProject { path });
+        }
+        let wanted = editor_version
+            .or(project.editor_version)
+            .ok_or_else(|| UniHubError::NoEditorVersion { path: path.clone() })?;
+        let editor = self
+            .list_editors()
+            .into_iter()
+            .find(|e| e.version == wanted)
+            .ok_or(UniHubError::EditorNotInstalled { version: wanted })?;
+
+        launch(&editor, &path)?;
+        self.store().update(&path, |p| p.last_opened_ms = Some(now_ms()))
+    }
+
+    // ---- Releases -----------------------------------------------------------------
+
+    /// One page (at most 25) of releases with an Apple Silicon build, newest first.
+    pub fn fetch_releases(
+        &self,
+        stream: ReleaseStream,
+        limit: u32,
+        offset: u32,
+        version_prefix: Option<String>,
+    ) -> Result<ReleasePage> {
+        releases::fetch(&self.http, stream, limit, offset, version_prefix.as_deref())
+    }
+
+    // ---- Unity CLI ----------------------------------------------------------------
+
+    /// Looks for the Unity CLI again and returns it, or `None` when it is not installed.
+    pub fn unity_cli(&self) -> Option<CliInfo> {
+        let override_path = lock(&self.settings).unity_cli_path.clone();
+        let found = unity_cli::locate(override_path.as_deref());
+        *lock(&self.cli) = found.clone();
+        found
+    }
+
+    /// Installs the Unity CLI with Unity's official installer script. The script
+    /// verifies the binary's SHA-256, installs it to `~/.unity/bin/unity` and adds that
+    /// folder to PATH in the user's shell configuration.
+    pub fn install_unity_cli(&self) -> Result<CliInfo> {
+        let channel = lock(&self.settings).cli_channel;
+        let script = self.http.get(CLI_INSTALL_SCRIPT).send()?.error_for_status()?.bytes()?;
+        let dir = self.paths.data_dir().join("tmp");
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("unity-cli-install.sh");
+        std::fs::write(&file, &script)?;
+
+        let mut cmd = Command::new("/bin/bash");
+        cmd.arg(&file).env("NO_COLOR", "1").stdin(Stdio::null());
+        if channel == CliChannel::Beta {
+            cmd.env("UNITY_CLI_CHANNEL", "beta");
+        }
+        let output = cmd.output();
+        let _ = std::fs::remove_file(&file);
+        let output = output?;
+        if !output.status.success() {
+            let text = String::from_utf8_lossy(&output.stderr);
+            return Err(UniHubError::CliFailed {
+                code: output.status.code().map_or_else(|| "signal".into(), |c| format!("exit-{c}")),
+                message: last_line(&text).unwrap_or("the installer failed").to_string(),
+            });
+        }
+        self.unity_cli().ok_or(UniHubError::CliNotInstalled)
+    }
+
+    pub fn check_unity_cli_update(&self) -> Result<CliUpdate> {
+        unity_cli::update_check(&self.cli_path()?)
+    }
+
+    pub fn update_unity_cli(&self) -> Result<CliInfo> {
+        let channel = lock(&self.settings).cli_channel;
+        let cli = self.cli_path()?;
+        let mut args = vec!["self-update", "--yes"];
+        if channel == CliChannel::Beta {
+            // Without a flag the CLI stays on its current channel.
+            args.extend(["--channel", channel.name()]);
+        }
+        unity_cli::run_json(&cli, &args)?;
+        self.unity_cli().ok_or(UniHubError::CliNotInstalled)
+    }
+
+    /// Removes the CLI binary and its PATH setup. Keeps its data (sign-in, settings).
+    pub fn uninstall_unity_cli(&self) -> Result<()> {
+        unity_cli::run_json(&self.cli_path()?, &["self-uninstall", "--yes"])?;
+        *lock(&self.cli) = None;
+        Ok(())
+    }
+
+    // ---- Account --------------------------------------------------------------------
+
+    pub fn auth_status(&self) -> Result<AuthStatus> {
+        unity_cli::auth_status(&self.cli_path()?)
+    }
+
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        unity_cli::accounts(&self.cli_path()?)
+    }
+
+    /// Opens the Unity sign-in page in the browser and waits until the user finishes
+    /// (or `cancel_sign_in` is called). Blocks: call it off the main thread.
+    pub fn sign_in(&self) -> Result<AuthStatus> {
+        let cli = self.cli_path()?;
+        self.sign_in.run(&cli)?;
+        unity_cli::auth_status(&cli)
+    }
+
+    pub fn cancel_sign_in(&self) {
+        self.sign_in.cancel();
+    }
+
+    /// Signs out one account (by id or email), or every account when `None`.
+    pub fn sign_out(&self, account: Option<String>) -> Result<()> {
+        let cli = self.cli_path()?;
+        let mut args = vec!["auth", "logout", "--yes"];
+        if let Some(a) = account.as_deref() {
+            args.push(a);
+        }
+        unity_cli::run_json(&cli, &args).map(|_| ())
+    }
+
+    pub fn switch_account(&self, account: String) -> Result<()> {
+        unity_cli::run_json(&self.cli_path()?, &["auth", "switch", &account]).map(|_| ())
+    }
+
+    // ---- Licenses -------------------------------------------------------------------
+
+    pub fn license_status(&self) -> Result<LicenseStatus> {
+        unity_cli::license_status(&self.cli_path()?)
+    }
+
+    /// Activates the free Unity Personal license. `accept_terms` must be true: the UI
+    /// passes it only after the user has agreed to the Unity Personal terms.
+    pub fn activate_personal_license(&self, accept_terms: bool) -> Result<()> {
+        if !accept_terms {
+            return Err(UniHubError::InvalidData {
+                message: "the Unity Personal license terms must be accepted first".into(),
+            });
+        }
+        unity_cli::run_json(&self.cli_path()?, &["license", "activate", "--personal", "--accept-eula"])
+            .map(|_| ())
+    }
+
+    pub fn return_licenses(&self) -> Result<()> {
+        unity_cli::run_json(&self.cli_path()?, &["license", "return", "--yes"]).map(|_| ())
+    }
+
+    // ---- Tools (CLI plugins) --------------------------------------------------------
+
+    /// Tools the Unity CLI can install. `refresh` re-downloads the registry.
+    pub fn plugins(&self, refresh: bool) -> Result<Vec<Plugin>> {
+        unity_cli::plugins(&self.cli_path()?, refresh)
+    }
+
+    /// Installs a tool. `accept_terms` must be true: the UI passes it only after the
+    /// user has agreed to the tool's license terms.
+    pub fn install_plugin(&self, id: String, accept_terms: bool) -> Result<()> {
+        let mut args = vec!["plugin", "install", id.as_str()];
+        if accept_terms {
+            args.push("--accept-eula");
+        }
+        unity_cli::run_json(&self.cli_path()?, &args).map(|_| ())
+    }
+
+    pub fn upgrade_plugin(&self, id: String, accept_terms: bool) -> Result<()> {
+        let mut args = vec!["plugin", "upgrade", id.as_str()];
+        if accept_terms {
+            args.push("--accept-eula");
+        }
+        unity_cli::run_json(&self.cli_path()?, &args).map(|_| ())
+    }
+
+    pub fn remove_plugin(&self, id: String) -> Result<()> {
+        unity_cli::run_json(&self.cli_path()?, &["plugin", "remove", &id, "--yes"]).map(|_| ())
+    }
+}
+
+impl UniHub {
+    fn store(&self) -> MutexGuard<'_, ProjectStore> {
+        lock(&self.store)
+    }
+
+    /// The cached CLI if its binary is still there, otherwise a fresh search.
+    fn cli_path(&self) -> Result<PathBuf> {
+        let cached = lock(&self.cli).as_ref().map(|i| PathBuf::from(&i.path));
+        if let Some(path) = cached.filter(|p| p.is_file()) {
+            return Ok(path);
+        }
+        self.unity_cli().map(|i| PathBuf::from(i.path)).ok_or(UniHubError::CliNotInstalled)
+    }
+
+    /// Built-in editor roots plus the ones from settings.
+    fn editor_search_paths(&self) -> UniHubPaths {
+        let settings = lock(&self.settings);
+        let mut paths = self.paths.clone();
+        let extra = settings.editor_install_dir.iter().chain(settings.extra_editor_dirs.iter());
+        for dir in extra {
+            if !paths.editor_roots.contains(dir) {
+                paths.editor_roots.push(dir.clone());
+            }
+        }
+        paths
+    }
+}
+
+/// A panic while holding a lock leaves the data intact, so keep going.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Starts the editor detached from UniHub. A background thread reaps it on exit so
+/// no zombie process is left behind.
+fn launch(editor: &Editor, project_path: &str) -> Result<()> {
+    let mut child = Command::new(&editor.executable_path)
+        .arg("-projectPath")
+        .arg(Path::new(project_path))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn last_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).last()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}

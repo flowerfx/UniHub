@@ -1,0 +1,22 @@
+[package]
+name = "unihub-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for UniHub, a native launcher and installer for Unity editors"
+
+[lib]
+name = "unihub_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+uniffi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+dirs = "7"
+plist = "1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "native-tls"] }
+
+[dev-dependencies]
+tempfile = "3"

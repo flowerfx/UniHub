@@ -1,0 +1,13 @@
+[package]
+name = "unihub-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "unihub"
+path = "src/main.rs"
+
+[dependencies]
+unihub-core = { path = "../unihub-core" }
+clap = { version = "4", features = ["derive"] }
