@@ -29,6 +29,9 @@ pub struct Project {
     pub modified_ms: Option<i64>,
     /// False when the folder is missing or no longer looks like a Unity project.
     pub exists: bool,
+    /// macOS refused to let UniHub read the folder (privacy settings for external drives,
+    /// Documents, Desktop…), so nothing about the project could be read.
+    pub access_denied: bool,
     /// Git (GitHub, GitLab, other hosts), Unity Version Control or Perforce, if used.
     pub source_control: Option<SourceControl>,
 }
@@ -157,6 +160,12 @@ fn normalize(path: &str) -> String {
     path_string(&p)
 }
 
+/// Reading the folder fails with "operation not permitted": a privacy refusal, not a
+/// missing folder.
+fn access_denied(dir: &Path) -> bool {
+    matches!(fs::read_dir(dir), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 pub fn is_unity_project(dir: &Path) -> bool {
     dir.join("Assets").is_dir() && dir.join("ProjectSettings").is_dir()
 }
@@ -173,6 +182,7 @@ fn build_project(path: &str, stored: &StoredProject) -> Project {
         last_opened_ms: stored.last_opened_ms,
         modified_ms: modified_ms(dir),
         exists: is_unity_project(dir),
+        access_denied: access_denied(dir),
         source_control: vcs::detect(dir),
     }
 }
@@ -279,5 +289,18 @@ mod tests {
         let mut store = ProjectStore::open(&tmp.path().join("data"), None).unwrap();
         let err = store.add(&path_string(tmp.path())).unwrap_err();
         assert!(matches!(err, UniHubError::NotAProject { .. }));
+    }
+
+    #[test]
+    fn tells_a_refused_folder_from_a_missing_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("Locked");
+        fs::create_dir_all(locked.join("Assets")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(access_denied(&locked));
+        assert!(!access_denied(&dir.path().join("Missing")));
+        assert!(!access_denied(dir.path()));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

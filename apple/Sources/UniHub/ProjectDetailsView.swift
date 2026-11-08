@@ -13,6 +13,9 @@ struct ProjectDetailsView: View {
             if let project = model.detailsProject {
                 Form {
                     HeaderSection(model: model, project: project)
+                    if project.accessDenied {
+                        AccessSection(model: model, project: project)
+                    }
                     ProjectSection(model: model, project: project, details: model.details)
                     SizeSection(model: model, project: project)
                     SourceControlSection(model: model, project: project, details: model.details)
@@ -75,6 +78,36 @@ private struct HeaderSection: View {
                     .disabled(!project.exists || model.editors.isEmpty)
                     Button("Show in Finder") { model.revealInFinder(project.path) }
                         .disabled(!project.exists)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+}
+
+/// macOS refused access to the project folder, so nothing below could be read.
+private struct AccessSection: View {
+    let model: AppModel
+    let project: Project
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("UniHub cannot read this folder", systemImage: "lock.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Text("macOS blocked access to it. For a project on an external drive, turn on Removable Volumes (or Network Volumes) for UniHub in Files and Folders; for Documents, Desktop or Downloads, turn on that folder. Then press ⌘R to refresh.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Open Privacy Settings") {
+                        model.openURL("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
+                    }
+                    Button("Refresh") {
+                        Task { await model.refreshLocal() }
+                        model.reloadDetails()
+                    }
                 }
             }
             .padding(.vertical, 4)
