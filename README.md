@@ -87,15 +87,25 @@ cargo run -p unihub-cli -- projects
 ## Releasing
 
 1. Bump `version` in `Cargo.toml` (`[workspace.package]`); the app takes its version from it.
-2. Build the DMG:
+   Commit and push.
+2. Publish:
 
    ```bash
-   ./scripts/make-dmg.sh          # → release/UniHub-<version>.dmg and .dmg.sha256
+   ./scripts/publish-release.sh --dry-run   # checks and shows the release, publishes nothing
+   ./scripts/publish-release.sh             # builds the DMG, asks, then publishes v<version>
    ```
 
-3. Create a GitHub release tagged `v<version>` and attach **both** files. Installed copies of
-   UniHub find it through `api.github.com/repos/flowerfx/UniHub/releases/latest` and refuse a
-   DMG that has no `.sha256` next to it. Drafts and pre-releases are ignored.
+   It refuses uncommitted changes, a commit that is not on GitHub yet and a tag that already
+   exists. It builds `release/UniHub-<version>.dmg` and its `.sha256` (`scripts/make-dmg.sh`),
+   writes the notes from the commits since the last release (or `--notes-file notes.md`),
+   creates a draft release, uploads both files and only then publishes it; GitHub creates the
+   tag. It needs a GitHub token that may write the repository's contents, from `GH_TOKEN`,
+   the GitHub CLI (`gh auth login`), or the credential git has stored for github.com.
+
+Installed copies of UniHub find the release through
+`api.github.com/repos/flowerfx/UniHub/releases/latest` and refuse a DMG that has no `.sha256`
+next to it. Drafts and pre-releases are ignored. To publish by hand instead, run
+`./scripts/make-dmg.sh` and attach both files to a release tagged `v<version>`.
 
 `release/` is not committed. The app is ad-hoc signed, not notarized: the first time someone
 opens a DMG downloaded in a browser, macOS asks them to allow it in System Settings →
