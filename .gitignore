@@ -30,6 +30,8 @@ DerivedData/
 /dist
 # DMGs from scripts/make-dmg.sh: published as GitHub release assets, not committed
 /release
+# This Mac's code-signing identity for bundle-app.sh
+/.signing-identity
 
 # --- Editors and OS -------------------------------------------------------------
 .DS_Store

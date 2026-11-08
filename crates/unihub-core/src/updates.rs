@@ -171,6 +171,15 @@ pub(crate) fn install_dmg(dmg: &Path, app_path: &Path, version: &str, work_dir: 
     }
     run("/usr/bin/codesign", &["--verify", "--deep", "--strict", &new_app.to_string_lossy()])
         .map_err(|e| invalid(&format!("the updated app's code signature is not valid: {e}")))?;
+    // A copy signed with a certificate only accepts an update from the same signer. Ad-hoc
+    // copies (UniHub 0.1.x) cannot pin a signer, so they accept any valid signature.
+    if let Some(requirement) = designated_requirement(app_path) {
+        run(
+            "/usr/bin/codesign",
+            &["--verify", "--deep", "--strict", &format!("-R={requirement}"), &new_app.to_string_lossy()],
+        )
+        .map_err(|_| invalid("the update is not signed by the same developer as this copy of UniHub"))?;
+    }
 
     // Copy next to the current app (same volume), then swap with two renames.
     let parent = app_path.parent().ok_or_else(|| invalid("UniHub's location has no parent folder"))?;
@@ -212,6 +221,23 @@ fn check_target(app_path: &Path) -> Result<()> {
             parent.display()
         ))),
     }
+}
+
+/// The app's designated requirement ("who signed it"), unless it is ad-hoc signed
+/// (then the requirement is only its own `cdhash` and no other build can match it).
+fn designated_requirement(app: &Path) -> Option<String> {
+    let out = Command::new("/usr/bin/codesign").args(["-d", "-r-"]).arg(app).stdin(Stdio::null()).output().ok()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    parse_requirement(&text)
+}
+
+fn parse_requirement(codesign_output: &str) -> Option<String> {
+    codesign_output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("designated =>"))
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && !r.starts_with("cdhash"))
+        .map(str::to_string)
 }
 
 fn find_app(dir: &Path) -> Option<PathBuf> {
@@ -338,6 +364,18 @@ mod tests {
         assert_eq!(parse_checksum(&format!("{hex}  UniHub-0.1.0.dmg\n")).as_deref(), Some(hex));
         assert_eq!(parse_checksum(&hex.to_uppercase()).as_deref(), Some(hex));
         assert!(parse_checksum("not a checksum").is_none());
+    }
+
+    #[test]
+    fn reads_designated_requirements() {
+        let signed = "Executable=/Applications/UniHub.app/Contents/MacOS/UniHub\n\
+            designated => identifier \"io.github.unihub.app\" and anchor apple generic and certificate leaf[subject.CN] = \"Apple Development: X (ABC)\"\n";
+        assert_eq!(
+            parse_requirement(signed).as_deref(),
+            Some("identifier \"io.github.unihub.app\" and anchor apple generic and certificate leaf[subject.CN] = \"Apple Development: X (ABC)\"")
+        );
+        assert!(parse_requirement("# designated => cdhash H\"23e8366c\"\n").is_none());
+        assert!(parse_requirement("code object is not signed at all\n").is_none());
     }
 
     #[test]

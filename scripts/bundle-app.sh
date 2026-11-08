@@ -34,5 +34,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - "$APP" >/dev/null 2>&1
+# Sign with a fixed identity when one is set: $UNIHUB_SIGN_IDENTITY, or the SHA-1 or name
+# of a code-signing certificate in .signing-identity (not committed; see README). macOS
+# keys privacy permissions (Documents access…) to the signer, so with a fixed identity
+# they survive updates. Without one the app is ad-hoc signed and macOS asks again after
+# every update.
+IDENTITY="${UNIHUB_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ] && [ -f .signing-identity ]; then
+  IDENTITY=$(grep -v '^[[:space:]]*#' .signing-identity | head -1 | tr -d '[:space:]')
+fi
+if [ -n "$IDENTITY" ] && ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+  echo "warning: signing identity $IDENTITY is not in the keychain; signing ad-hoc instead" >&2
+  IDENTITY=""
+fi
+if [ -n "$IDENTITY" ]; then
+  codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
+  echo "Signed with $(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+else
+  echo "warning: no signing identity (.signing-identity); signing ad-hoc" >&2
+  codesign --force --sign - "$APP" >/dev/null 2>&1
+fi
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"

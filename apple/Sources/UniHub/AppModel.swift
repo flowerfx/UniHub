@@ -90,6 +90,12 @@ final class AppModel {
 
     var installedVersions: Set<String> { Set(editors.map(\.version)) }
 
+    /// The five projects opened or changed most recently (the menu bar list).
+    var recentProjects: [Project] {
+        let recency = { (p: Project) in max(p.lastOpenedMs ?? 0, p.modifiedMs ?? 0) }
+        return Array(projects.filter(\.exists).sorted { recency($0) > recency($1) }.prefix(5))
+    }
+
     func isInstalled(_ version: String?) -> Bool {
         version.map(installedVersions.contains) ?? false
     }

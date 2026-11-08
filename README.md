@@ -43,6 +43,10 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
   see your licenses, activate Unity Personal or return licenses.
 - **Tools:** install, update or uninstall the Unity CLI, and install, update or remove the
   tools it manages (Unity Version Control `cm`, Unity Gaming Services CLI, and more).
+- **Menu bar:** like the official Hub, an icon in the menu bar lists your five most recent
+  projects (click to open one in its editor), Go to Unity Dashboard, Sign in/out, Help and
+  support, Open UniHub and Quit. While it is shown, closing the window keeps UniHub running
+  there; turn it off in Settings → Appearance.
 - **Settings (⌘,):** Accounts, Licenses, Appearance, Projects, Installs, Unity CLI, Advanced.
 - **Updates:** once a day (or UniHub → Check for Updates…) UniHub looks for a newer release
   on [GitHub](https://github.com/flowerfx/UniHub/releases), shows its notes, and on
@@ -86,6 +90,11 @@ cargo run -p unihub-cli -- projects
 
 ## Releasing
 
+0. Once per Mac: put the SHA-1 (or exact name) of a code-signing certificate from
+   `security find-identity -v -p codesigning` in `.signing-identity` at the repository root
+   (not committed; lines starting with `#` are ignored). `bundle-app.sh` signs with it, or
+   `UNIHUB_SIGN_IDENTITY` if set. macOS ties privacy permissions (access to Documents…) to the
+   signer, so with a fixed certificate users are not asked again after each update.
 1. Bump `version` in `Cargo.toml` (`[workspace.package]`); the app takes its version from it.
    Commit and push.
 2. Publish:
@@ -104,13 +113,16 @@ cargo run -p unihub-cli -- projects
 
 Installed copies of UniHub find the release through
 `api.github.com/repos/flowerfx/UniHub/releases/latest` and refuse a DMG that has no `.sha256`
-next to it. Drafts and pre-releases are ignored. To publish by hand instead, run
+next to it. Drafts and pre-releases are ignored. A copy signed with a certificate installs only
+updates signed by the same developer (same designated requirement); ad-hoc signed copies
+(0.1.0 and 0.1.1) accept any validly signed update. `publish-release.sh` refuses an ad-hoc
+signed build. To publish by hand instead, run
 `./scripts/make-dmg.sh` and attach both files to a release tagged `v<version>`.
 
-`release/` is not committed. The app is ad-hoc signed, not notarized: the first time someone
-opens a DMG downloaded in a browser, macOS asks them to allow it in System Settings →
-Privacy & Security. Updates installed by UniHub itself are not quarantined, so they open
-directly. `unihub update [--install]` checks for, or installs, an update from the terminal.
+`release/` is not committed. The app is not notarized (that needs a Developer ID
+certificate): the first time someone opens a DMG downloaded in a browser, macOS asks them to
+allow it in System Settings → Privacy & Security. Updates installed by UniHub itself are not
+quarantined, so they open directly. `unihub update [--install]` checks for, or installs, an update from the terminal.
 
 After editing `apple/Resources/AppIcon.svg`, regenerate the app icon (the `.icns` is committed,
 so normal builds don't need this step):

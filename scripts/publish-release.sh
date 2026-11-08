@@ -91,6 +91,11 @@ SUM="$DMG.sha256"
 if [ "$SKIP_BUILD" = 0 ]; then
   ./scripts/make-dmg.sh
 fi
+# An ad-hoc signed release makes macOS ask every user for permissions again after updating,
+# and cannot be checked against the signer of the copy being updated.
+if codesign -dv dist/UniHub.app 2>&1 | grep -q '^Signature=adhoc'; then
+  problem "dist/UniHub.app is ad-hoc signed; put a code-signing identity in .signing-identity (see README) and build again"
+fi
 if [ -f "$DMG" ] && [ -f "$SUM" ]; then
   (cd release && shasum -a 256 -c "$(basename "$SUM")" >/dev/null) || die "$DMG does not match $SUM"
 else

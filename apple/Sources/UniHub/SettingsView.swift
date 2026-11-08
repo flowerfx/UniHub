@@ -290,8 +290,16 @@ private struct AppearancePane: View {
                 .pickerStyle(.segmented)
                 Toggle("Hide UniHub when a project opens", isOn: setting(model, \.hideOnProjectOpen))
             }
+            Section {
+                Toggle("Show UniHub in the menu bar", isOn: $showMenuBarIcon)
+                Text("Recent projects, your Unity account and help, from the menu bar. While it is shown, closing the window keeps UniHub running there.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
+
+    @AppStorage(MenuBarMenu.showKey) private var showMenuBarIcon = true
 }
 
 // MARK: - Projects

@@ -5,9 +5,11 @@ import SwiftUI
 struct UniHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @AppStorage(MenuBarMenu.showKey) private var showMenuBarIcon = true
 
     var body: some Scene {
-        WindowGroup("UniHub") {
+        // One main window: "Open UniHub" in the menu bar brings it back instead of adding more.
+        Window("UniHub", id: MenuBarMenu.mainWindowID) {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 520)
@@ -35,6 +37,15 @@ struct UniHubApp: App {
             SettingsView()
                 .environment(model)
         }
+
+        // Menu bar icon with recent projects, like the official Hub's.
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
+            MenuBarMenu(model: model)
+        } label: {
+            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                .accessibilityLabel("UniHub")
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
@@ -45,7 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
     }
 
+    /// With the menu bar icon, closing the window keeps UniHub running there.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !(UserDefaults.standard.object(forKey: MenuBarMenu.showKey) as? Bool ?? true)
     }
 }
