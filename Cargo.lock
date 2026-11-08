@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "uniffi",
 ]
@@ -1605,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "unihub-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "unihub-core",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "unihub-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "plist",
