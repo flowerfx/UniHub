@@ -20,7 +20,8 @@ sign-in internals are deliberately out of scope.
 | `editors-v2.json` | Editors added manually from outside the install folder | `{"schema_version":"2","data":[]}` |
 | `excludedEditorFolders.json` | Editors the user removed from the list | `{"schema_version":"1","data":[]}` |
 | `secondaryInstallPath.json` | Custom editor install root. `""` means the default | JSON string |
-| `projectDir.json` | Default folder for new projects | `{"directoryPath": "..."}` |
+| `projectDir.json` | Folder last used for a new project, offered next time | `{"directoryPath": "..."}` |
+| `Templates/` | Downloaded project templates and their `manifest.json` (see §10) | `.tgz`, JSON |
 | `user-settings.json` | e.g. `download.maxConcurrentDownloads`, theme, tray | JSON |
 | `modulesPreference.json` | Modules ticked last time | `{"selected":[ids],"deselected":[]}` |
 | `install-state/install-state.db` | SQLite download/install queue (see §4) | SQLite |
@@ -232,7 +233,7 @@ UniHub follows the ones that apply to it.
 |---|---|
 | Appearance | theme, language, minimise to tray, hide menu-bar icon |
 | Locations | editor install location, download location |
-| Projects | default project location, ask before removing a project, default project name |
+| Projects | default project location, ask before removing a project, "default project name" (despite the name, this switches the project list between folder names and product names, `projects.showProductNames`; it is not the name suggested for new projects) |
 | Editors | ask before uninstall, reset dismissed warnings |
 | Notifications | enable, show pop-ups, silent |
 | Deep links | always forward to a single editor |
@@ -277,11 +278,110 @@ for GitHub and GitLab, whose URL layouts are known; credentials in HTTPS remotes
 stripped before display. UniHub does not implement the Hub's GitHub/GitLab OAuth
 connection ("Disconnect from {provider}").
 
-## 10. Scope of UniHub
+## 10. Creating a project from a template
 
-In scope: project list (compatible with `projects-v1.json`, read-only), editor discovery,
-release browsing, launching, settings, a CLI, and account, license and tool management
-**through the official Unity CLI**. Next: downloading and installing editors and modules.
+Observed with REA (Hub 3.22.6 main-process modules, its logs of two creations, and the
+public template catalogue), 2026-11-09.
+
+### Templates
+
+- **Built-in:** every `*.tgz` in `<Unity.app>/Contents/Resources/PackageManager/ProjectTemplates`
+  (the `libcache` folder there is not a template). A template is a UPM package: the
+  archive holds `package/package.json` (`name`, `displayName`, `version`, `description`,
+  `type: "template"`, `dependencies`) and the project itself under `package/ProjectData~/`
+  (`Assets`, `Packages`, `ProjectSettings`). The file name can differ from the package
+  name (`com.unity.template.3d-cross-platform-17.0.12.tgz` holds
+  `com.unity.template.urp-blank`), so the Hub reads `package.json`. Built-ins are ready to use.
+- **Downloaded:** `~/Library/Application Support/UnityHub/Templates/<name>-<version>.tgz`,
+  recorded per editor in `manifest.json`:
+  `{"6000.0.85f1": {"dependencies": {"com.unity.template.vr": "9.2.3"}}}`. A downloaded
+  template is offered only to the editors listed for it.
+- **Catalogue:** a GraphQL endpoint (`live-platform-api.prd.ld.unity3d.com/graphql`) queried
+  with the editor's `<major>.<minor>`, no sign-in needed. Each template has a display name,
+  description, type (`CORE`, `SAMPLE`, `LEARNING`), `isNew`, render pipeline, build
+  platforms, icon and preview image URLs, and versions newest first, each with a size and a
+  `tarball` (`url` on `download.packages.unity.com`, `integrity`). The integrity is
+  `sha1-<base64>`, where the base64 holds the hex digest (npm's form, the raw 20 bytes, also
+  occurs); it is checked against the SHA-1 of the downloaded file.
+- **Merging:** the newest catalogue version for the editor is compared with the copy on
+  disk: no copy means "Download template"; the same version uses the file with the
+  catalogue's display data; a newer catalogue version is offered as an upgrade; a newer
+  local copy (a built-in 17.0.12 against a catalogue 17.0.9) wins.
+- The dialog has All, New, Core, Sample and Learning tabs, plus Custom for templates the user
+  made. Ready templates show "Create project"; the others "Download template" first
+  (with an age or terms step when the catalogue asks for one).
+- The Unity CLI gives the same merged list: `unity templates --editor-version <v> --json`
+  returns `items` with `name`, `displayName`, `type`, `version`, `status` (`READY`,
+  `DOWNLOADABLE`), `tar` (the archive on disk), `remoteTar`, `remoteVersion`, `integrity`,
+  `size`/`remoteSize`, `renderPipeline`, `buildPlatforms`, `dynamicIcon`, `previewImage`,
+  `isNew` and `isUserGenerated`.
+
+### Name and location
+
+- Suggested name: "My project", or "My project (n)" with `n` one above the highest number
+  already used in the folder (names compared without regard to case).
+- Default location: `projectDir.json`, else the home folder; the Hub saves the folder used
+  after each creation.
+- The name must work on Windows too: not empty, at most 223 characters, none of
+  `< > : " / \ | ? * ` %` or control characters, no leading space, no trailing space or dot,
+  and not a reserved Windows name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`).
+- The project folder must **not exist** yet, not even empty, and its parent must be
+  readable and writable.
+
+### Launching the editor
+
+The Hub does not use the Unity CLI for this. It starts the editor directly, as a normal
+(not batch-mode) launch:
+
+```
+<Unity.app>/Contents/MacOS/Unity -createProject <parent>/<name> \
+    -cloneFromTemplate <template .tgz> \
+    -cloudOrganization <id or ""> -cloudProject <id or ""> -cloudEnvironment production
+```
+
+- **The editor creates the folder**, unpacks the template, resolves packages and opens the
+  project.
+- Without Unity Cloud both cloud ids are empty strings. With Unity Cloud or Unity Version
+  Control the Hub first creates the cloud project or repository through Unity's services
+  and passes its id. The Hub also adds its session, IPC and access-token flags; those belong
+  to sign-in and are not replicated.
+- For an editor without a `ProjectTemplates` folder, the Hub falls back to
+  `-projectTemplate 0|1` (old built-in 3D/2D).
+- The project is added to `projects-v1.json` right after the editor starts (title, path,
+  version, architecture, now as `lastModified`), without waiting for the editor. It is taken
+  off again if the editor fails before the folder is a Unity project. Other fields are
+  filled in by later refreshes.
+- Custom templates may ask for `%PROJECT_NAME%` to be replaced in some of their files
+  (`hasProjectNamePlaceholder`, `rootFiles` in `package.json`); the Hub repacks such a
+  template before launching.
+- `unity projects create` does the same in batch mode (`-batchmode -nographics -quit`),
+  downloads templates itself, and adds extra setup unless `--bare`.
+
+### How UniHub does it
+
+- **Templates:** `unity templates --editor-version <v> --json` when the Unity CLI is
+  installed; without it, the editor's built-in templates and the ones downloaded for that
+  editor into UniHub's `templates/` folder or the Hub's `Templates/` folder (read-only),
+  read from their `package.json`. Archives the CLI already describes are not opened.
+- **Downloading:** a template that is not on disk is downloaded from its `remoteTar` URL
+  into `~/Library/Application Support/UniHub/templates/<name>-<version>.tgz`, checked
+  against its `integrity`, and recorded in a `manifest.json` of the same shape as the Hub's.
+  Finding the download URL needs the Unity CLI.
+- **Creating:** the same rules for the name and folder, then the editor is started with
+  `-createProject`, `-cloneFromTemplate` and the empty cloud ids, as above. The project is
+  listed in UniHub right away (UniHub still never writes the Hub's files, so the Hub sees
+  it only after an import into its own list) and the job finishes once the editor has
+  written `ProjectSettings/ProjectVersion.txt`. If the editor quits before that, the
+  project is taken off the list. Cancelling stops the download or the editor.
+- Not done: Unity Cloud and Unity Version Control connection for new projects, the
+  `%PROJECT_NAME%` replacement for custom templates, and age or terms steps.
+
+## 11. Scope of UniHub
+
+In scope: project list (compatible with `projects-v1.json`, read-only), creating projects
+from templates, editor discovery, release browsing, launching, settings, a CLI, and
+account, license and tool management **through the official Unity CLI**. Next: downloading
+and installing editors and modules.
 
 Out of scope: reimplementing Unity's sign-in, token handling or licensing protocols,
 cloud/organisation features, Learn, Community.

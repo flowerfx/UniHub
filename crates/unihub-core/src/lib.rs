@@ -1,5 +1,6 @@
-//! UniHub core: project list, editor discovery, release catalogue, launching,
-//! settings, and Unity account / tool management through the official Unity CLI.
+//! UniHub core: project list, new projects from templates, editor discovery, release
+//! catalogue, launching, settings, and Unity account / tool management through the
+//! official Unity CLI.
 //!
 //! Exposed to Swift through UniFFI as the `UniHub` object. The same API is used by the
 //! `unihub` command-line tool.
@@ -7,6 +8,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod clean;
+pub mod create;
 pub mod details;
 pub mod editors;
 mod error;
@@ -16,6 +18,7 @@ mod paths;
 pub mod projects;
 pub mod releases;
 pub mod settings;
+pub mod templates;
 pub mod unity_cli;
 pub mod updates;
 pub mod vcs;
@@ -35,6 +38,7 @@ pub use projects::Project;
 pub use jobs::{Job, JobKind, JobState};
 pub use releases::{Download, LicenseTerms, Module, ModuleKind, Release, ReleasePage, ReleaseStream};
 pub use settings::{Appearance, CliChannel, Settings};
+pub use templates::{Template, TemplateKind};
 pub use updates::AppUpdate;
 pub use unity_cli::{Account, AuthStatus, CliInfo, CliUpdate, License, LicenseStatus, Plugin};
 pub use vcs::{GitStatus, SourceControl, VcsProvider};
@@ -47,7 +51,8 @@ pub const CLI_INSTALL_SCRIPT: &str = "https://public-cdn.cloud.unity3d.com/hub/p
 #[derive(uniffi::Object)]
 pub struct UniHub {
     paths: UniHubPaths,
-    store: Mutex<ProjectStore>,
+    /// Shared with project-creation jobs, which list the new project while it is made.
+    store: Arc<Mutex<ProjectStore>>,
     settings: Mutex<Settings>,
     http: reqwest::blocking::Client,
     sign_in: unity_cli::SignIn,
@@ -83,7 +88,7 @@ impl UniHub {
             .build()?;
         Ok(Arc::new(Self {
             paths,
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
             settings: Mutex::new(settings),
             http,
             sign_in: unity_cli::SignIn::default(),
@@ -188,6 +193,97 @@ impl UniHub {
             Some(hub) => self.store().import_from_hub(&hub),
             None => Ok(0),
         }
+    }
+
+
+    // ---- New projects ---------------------------------------------------------------
+
+    /// Templates for a new project with this editor: Unity's catalogue for it when the Unity
+    /// CLI is installed (including templates still to be downloaded), plus the templates on
+    /// disk. Runs the CLI (and may go online), so call it off the main thread.
+    pub fn project_templates(&self, editor_version: String, architecture: String) -> Result<TemplateCatalog> {
+        let editor = self.find_editor(&editor_version, &architecture)?;
+        let (catalogue, note) = match self.cli_path() {
+            Ok(cli) => match unity_cli::run_json(&cli, &["templates", "--editor-version", &editor.version]) {
+                Ok(data) => (templates::parse_cli(&data), None),
+                Err(e) => (Vec::new(), Some(format!("Only templates on this Mac are shown: {e}"))),
+            },
+            Err(_) => (
+                Vec::new(),
+                Some("Only templates on this Mac are shown. Install the Unity CLI from the Tools page to see and download all of Unity's templates.".into()),
+            ),
+        };
+        // Opening an archive means decompressing it, so skip the ones the catalogue describes.
+        let known = catalogue.iter().filter_map(|t| t.archive_path.as_ref().map(PathBuf::from)).collect();
+        let local = templates::local(Path::new(&editor.app_path), &editor.version, &self.template_dirs(), &known);
+        Ok(TemplateCatalog { templates: templates::merge(catalogue, local), note })
+    }
+
+    /// Where new projects go: the setting, or `~/Documents`.
+    pub fn default_project_location(&self) -> String {
+        lock(&self.settings).default_projects_dir.clone().unwrap_or_else(|| {
+            dirs::document_dir().or_else(dirs::home_dir).map(|d| paths::path_string(&d)).unwrap_or_default()
+        })
+    }
+
+    /// "My project", or "My project (1)"… when that folder exists in `parent_dir`.
+    pub fn suggest_project_name(&self, parent_dir: String) -> String {
+        create::unique_name(Path::new(&parent_dir), create::DEFAULT_NAME)
+    }
+
+    /// Checks a new project's name and location and returns the project's folder, or why
+    /// it cannot be created there.
+    pub fn check_new_project(&self, parent_dir: String, name: String) -> Result<String> {
+        create::check(&parent_dir, &name).map(|p| paths::path_string(&p))
+    }
+
+    /// Creates a project from a template in the background and returns the job id. The
+    /// project is listed at once; the job downloads the template if needed (that needs the
+    /// Unity CLI), then starts the editor, which creates and opens the project.
+    pub fn create_project(
+        &self,
+        parent_dir: String,
+        name: String,
+        editor_version: String,
+        architecture: String,
+        template_id: String,
+    ) -> Result<u64> {
+        let project = create::check_before_creating(&parent_dir, &name)?;
+        let project_path = paths::path_string(&project);
+        let editor = self.find_editor(&editor_version, &architecture)?;
+        if self.jobs.list().iter().any(|j| j.state == JobState::Running && j.project_path.as_deref() == Some(&project_path)) {
+            return Err(UniHubError::InvalidData { message: format!("{project_path} is already being created") });
+        }
+        let on_disk = templates::find_local(Path::new(&editor.app_path), &editor.version, &self.template_dirs(), &template_id);
+        let cli = self.cli_path().ok();
+        if on_disk.is_none() && cli.is_none() {
+            return Err(UniHubError::CliNotInstalled);
+        }
+        self.store().add_pending(&project_path, now_ms())?;
+
+        let http = self.http.clone();
+        let store = Arc::clone(&self.store);
+        let download_dir = self.unihub_template_dir();
+        let path = project_path.clone();
+        let (version, arch) = (editor.version.clone(), editor.architecture.clone());
+        Ok(self.jobs.spawn_task(JobKind::CreateProject, &version, &arch, Some(project_path), move |task| {
+            let result = (|| {
+                let archive = match on_disk {
+                    Some(archive) => archive,
+                    None => {
+                        let cli = cli.ok_or(UniHubError::CliNotInstalled)?;
+                        fetch_template(&http, &cli, &editor.version, &template_id, &download_dir, task)?
+                    }
+                };
+                task.check()?;
+                create::launch(&editor, &project, &archive, task)
+            })();
+            // Nothing was created: take the project off the list again.
+            if result.is_err() && !projects::is_unity_project(&project) {
+                let _ = lock(&store).remove(&path);
+            }
+            result
+        }))
     }
 
     // ---- Editors ------------------------------------------------------------------
@@ -589,6 +685,20 @@ impl UniHub {
         self.unity_cli().map(|i| PathBuf::from(i.path)).ok_or(UniHubError::CliNotInstalled)
     }
 
+    /// UniHub's own folder for downloaded templates.
+    fn unihub_template_dir(&self) -> PathBuf {
+        self.paths.data_dir().join("templates")
+    }
+
+    /// Folders with downloaded templates: UniHub's, then the Hub's (also used by the CLI).
+    fn template_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.unihub_template_dir()];
+        if let Some(hub) = self.paths.hub_data_dir() {
+            dirs.push(hub.join("Templates"));
+        }
+        dirs
+    }
+
     /// Built-in editor roots plus the ones from settings.
     fn editor_search_paths(&self) -> UniHubPaths {
         let settings = lock(&self.settings);
@@ -601,6 +711,43 @@ impl UniHub {
         }
         paths
     }
+}
+
+/// Templates offered for a new project, and why the list may be incomplete.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TemplateCatalog {
+    pub templates: Vec<Template>,
+    /// Set when only the templates on disk could be listed (no Unity CLI, offline…).
+    pub note: Option<String>,
+}
+
+/// Finds a template that is not on disk in Unity's catalogue and downloads it into
+/// `download_dir`, unless an earlier download is there. Returns the archive.
+fn fetch_template(
+    http: &reqwest::blocking::Client,
+    cli: &Path,
+    editor_version: &str,
+    template_id: &str,
+    download_dir: &Path,
+    task: &jobs::Task,
+) -> Result<PathBuf> {
+    task.progress("Looking up the template…", Some("download"), None);
+    let data = unity_cli::run_json(cli, &["templates", "--editor-version", editor_version])?;
+    let template = templates::parse_cli(&data).into_iter().find(|t| t.id == template_id).ok_or_else(|| {
+        UniHubError::InvalidData { message: format!("Unity {editor_version} has no template {template_id}") }
+    })?;
+    if let Some(archive) = template.archive_path {
+        return Ok(PathBuf::from(archive));
+    }
+    let url = template.download_url.ok_or_else(|| UniHubError::InvalidData {
+        message: format!("{} is not on this Mac and Unity's catalogue gives no download for it", template.display_name),
+    })?;
+    let dest = download_dir.join(format!("{}-{}.tgz", template.id, template.version));
+    if !dest.is_file() {
+        create::download(http, &url, template.integrity.as_deref(), &dest, task)?;
+    }
+    create::record_download(download_dir, editor_version, &template.id, &template.version)?;
+    Ok(dest)
 }
 
 /// `--architecture <arch>` for the Unity CLI, which knows `arm64` and `x86_64` only.

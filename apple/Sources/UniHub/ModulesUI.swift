@@ -341,6 +341,9 @@ struct JobRow: View {
             return "Installing Unity \(job.version)\(arch)"
         case .installModules:
             return "Adding modules to Unity \(job.version)"
+        case .createProject:
+            let name = job.projectPath.map { ($0 as NSString).lastPathComponent } ?? "project"
+            return "Creating \(name) with Unity \(job.version)"
         }
     }
 
@@ -350,9 +353,13 @@ struct JobRow: View {
             let step = job.percent.map { " — \(Int($0))%" } ?? ""
             return job.message + step
         case .succeeded:
-            return job.kind == .installEditor ? "Installed." : "Modules added."
+            switch job.kind {
+            case .installEditor: return "Installed."
+            case .installModules: return "Modules added."
+            case .createProject: return job.message
+            }
         case .failed:
-            return job.error ?? "The install failed."
+            return job.error ?? (job.kind == .createProject ? "The project could not be created." : "The install failed.")
         case .cancelled:
             return "Cancelled."
         }

@@ -21,6 +21,11 @@ struct MenuBarMenu: View {
             Button(project.title) { Task { await model.open(project) } }
                 .disabled(!model.isInstalled(project.editorVersion))
         }
+        Button("New Project…") {
+            UserDefaults.standard.set(Page.projects.rawValue, forKey: "page")
+            MainWindow.show(openWindow)
+            model.isCreatingProject = true
+        }
 
         Divider()
 

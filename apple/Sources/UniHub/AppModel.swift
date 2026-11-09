@@ -72,6 +72,8 @@ final class AppModel {
     var updateError: String?
 
     var isAddingProject = false
+    /// The "New Project" sheet is open.
+    var isCreatingProject = false
     /// Projects waiting for the "Remove from the list?" confirmation.
     var projectsPendingRemoval: [Project] = []
     var errorMessage: String?
@@ -166,6 +168,70 @@ final class AppModel {
             if settings.hideOnProjectOpen { NSApp.hide(nil) }
             await refreshLocal()
         }
+    }
+
+    // MARK: New projects
+
+    /// Templates for a new project with `editor`. Runs the Unity CLI, which may go online.
+    func templates(for editor: Editor) async -> Result<TemplateCatalog, Error> {
+        guard let unihub else { return .success(TemplateCatalog(templates: [], note: nil)) }
+        let version = editor.version
+        let architecture = editor.architecture
+        return await Task.detached {
+            Result { try unihub.projectTemplates(editorVersion: version, architecture: architecture) }
+        }.value
+    }
+
+    /// The default location from Settings, or ~/Documents.
+    var defaultProjectLocation: String {
+        unihub?.defaultProjectLocation() ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Documents").path
+    }
+
+    /// "My project", numbered when that folder exists in `location`.
+    func suggestProjectName(in location: String) -> String {
+        unihub?.suggestProjectName(parentDir: location) ?? "My project"
+    }
+
+    /// Why a project cannot be created with this name in this folder, or `nil` if it can.
+    func newProjectProblem(location: String, name: String) -> String? {
+        guard let unihub else { return "UniHub could not start." }
+        do {
+            _ = try unihub.checkNewProject(parentDir: location, name: name)
+            return nil
+        } catch UniHubError.InvalidData(let message) {
+            return message
+        } catch {
+            return describe(error)
+        }
+    }
+
+    /// Starts creating a project in the background; it is listed right away and opens in
+    /// Unity when the editor has made it. Returns false (and shows why) if it could not start.
+    func createProject(location: String, name: String, editor: Editor, template: Template) async -> Bool {
+        let version = editor.version
+        let architecture = editor.architecture
+        let id = template.id
+        let started = await perform {
+            _ = try $0.createProject(
+                parentDir: location, name: name, editorVersion: version, architecture: architecture, templateId: id
+            )
+        }
+        if started {
+            pollJobs()
+            await refreshLocal()
+        }
+        return started
+    }
+
+    /// Editor and module installs (shown on the Installs page).
+    var installJobs: [Job] { jobs.filter { $0.kind != .createProject } }
+
+    /// Projects being created, and finished creations not dismissed yet (shown on Projects).
+    var createJobs: [Job] { jobs.filter { $0.kind == .createProject } }
+
+    /// The running creation of the project at `path`, if any.
+    func creatingJob(path: String) -> Job? {
+        jobs.last { $0.kind == .createProject && $0.state == .running && $0.projectPath == path }
     }
 
     var detailsProject: Project? {
@@ -391,7 +457,7 @@ final class AppModel {
 
     /// The running install of this version, if any.
     func runningJob(version: String) -> Job? {
-        jobs.last { $0.version == version && $0.state == .running }
+        jobs.last { $0.version == version && $0.state == .running && $0.kind != .createProject }
     }
 
     func isBusy(_ editor: Editor) -> Bool {

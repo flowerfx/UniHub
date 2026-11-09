@@ -14,6 +14,14 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
 - **Projects:** your projects with editor version and last-modified time. Search,
   favourite, open, open with a specific editor, show in Finder. UniHub imports the
   official Hub's project list (read-only: it never writes to the Hub's files).
+- **New projects:** **New Project** (⌘N) creates a project from a template, like the Hub's
+  "New project": pick an installed editor, then a template (Core, Sample, Learning,
+  Custom, New) with its preview, render pipeline and platforms, a name ("My project",
+  numbered if taken) and a location. With the Unity CLI installed you see Unity's whole
+  catalogue for that editor; templates that are not on your Mac yet are downloaded from
+  Unity's package registry and checked against their checksum. Without it, the templates on
+  your Mac are offered. UniHub then starts the editor, which creates the project and opens
+  it; the project is listed at once, with its progress.
 - **Source control and details:** a column with each project's branch and provider (GitHub,
   GitLab, other Git hosts, Unity Version Control, Perforce). The arrow on each row opens a
   details panel: render pipeline, current platform, scripting backend, packages, size on
@@ -52,9 +60,10 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
   on [GitHub](https://github.com/flowerfx/UniHub/releases), shows its notes, and on
   "Install and Relaunch" downloads the DMG, checks its SHA-256, checks the app inside and
   replaces itself. Turn the daily check off in Settings → Advanced.
-- **CLI:** `unihub projects | editors | releases | install | uninstall | modules |
-  module-add | module-remove | open | add | remove | import | info | clean | account |
-  login | logout | tools | tool-install | tool-remove | cli | cli-install | settings | update`.
+- **CLI:** `unihub projects | templates | new | editors | releases | install | uninstall |
+  modules | module-add | module-remove | open | add | remove | import | info | clean |
+  account | login | logout | tools | tool-install | tool-remove | cli | cli-install |
+  settings | update`.
 
 ### How sign-in and installs work
 
@@ -137,11 +146,17 @@ Launch arguments are handy while working on the UI:
 dist/UniHub.app/Contents/MacOS/UniHub -page Tools -openSettings YES -settingsPane Licenses
 dist/UniHub.app/Contents/MacOS/UniHub -detailsProject /path/to/project
 dist/UniHub.app/Contents/MacOS/UniHub -cleanupProject /path/to/project
+dist/UniHub.app/Contents/MacOS/UniHub -newProject YES
 ```
 
 `unihub releases --version 2019.4` searches every stream; `unihub install 2022.3.62f3 -m ios
 android android-sdk-ndk-tools --accept-terms` installs with progress; `unihub modules
 6000.0.85f1` lists an editor's modules and `module-add` / `module-remove` change them.
+
+`unihub templates --editor 6000.0.85f1` lists the templates for an editor (↓ = downloaded on
+first use); `unihub new "My Game" --path ~/Projects --template com.unity.template.urp-blank`
+creates a project and opens it in Unity (defaults: the newest editor, the default project
+location, the first template on disk).
 
 `unihub clean <project>` lists what Clean Up would remove; add `--yes` to delete it, and
 `--all` to include ignored files that are not regenerated.
@@ -151,6 +166,8 @@ android android-sdk-ndk-tools --accept-terms` installs with progress; `unihub mo
 ```
 crates/unihub-core     Rust core, exported to Swift with UniFFI
   projects.rs          project list (own store + read-only import from the Hub)
+  templates.rs         project templates: the CLI's catalogue, built-in and downloaded ones
+  create.rs            new projects: name rules, template downloads, starting the editor
   editors.rs           installed-editor discovery
   releases.rs          Unity's public release API
   settings.rs          UniHub preferences
@@ -158,7 +175,7 @@ crates/unihub-core     Rust core, exported to Swift with UniFFI
   details.rs           project details panel and size on disk
   clean.rs             Clean Up: git-ignored or generated files, open-in-Unity check
   modules.rs           installed editors' modules (modules.json, or a folder scan)
-  jobs.rs              background editor/module installs through the Unity CLI, with progress
+  jobs.rs              background jobs with progress: installs through the Unity CLI, new projects
   updates.rs           UniHub's own updates from GitHub releases
   unity_cli.rs         sign-in, licenses and tools through the official Unity CLI
 crates/unihub-cli      `unihub` command-line tool

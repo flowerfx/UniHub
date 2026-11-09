@@ -27,6 +27,12 @@ struct UniHubApp: App {
                 CheckForUpdatesButton(model: model)
             }
             CommandGroup(replacing: .newItem) {
+                Button("New Project…") {
+                    UserDefaults.standard.set(Page.projects.rawValue, forKey: "page")
+                    MainWindow.show()
+                    model.isCreatingProject = true
+                }
+                .keyboardShortcut("n")
                 Button("Add Project…") { model.isAddingProject = true }
                     .keyboardShortcut("o")
                 Button("Refresh") { Task { await model.refreshLocal() } }

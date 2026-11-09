@@ -9,9 +9,9 @@ struct EditorsView: View {
     var body: some View {
         @Bindable var model = model
         List {
-            if !model.jobs.isEmpty {
+            if !model.installJobs.isEmpty {
                 Section("Installing") {
-                    ForEach(model.jobs, id: \.id) { job in
+                    ForEach(model.installJobs, id: \.id) { job in
                         JobRow(model: model, job: job)
                     }
                 }
@@ -21,7 +21,7 @@ struct EditorsView: View {
                     EditorRow(model: model, editor: editor)
                 }
             } header: {
-                if !model.jobs.isEmpty { Text("Installed") }
+                if !model.installJobs.isEmpty { Text("Installed") }
             }
         }
         .navigationTitle("Installs")
@@ -37,7 +37,7 @@ struct EditorsView: View {
         .overlay {
             if !model.hasLoadedLocal {
                 ProgressView()
-            } else if model.editors.isEmpty && model.jobs.isEmpty {
+            } else if model.editors.isEmpty && model.installJobs.isEmpty {
                 ContentUnavailableView {
                     Label("No editors found", systemImage: "shippingbox")
                 } description: {

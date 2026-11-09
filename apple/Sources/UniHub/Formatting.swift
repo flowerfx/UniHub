@@ -152,6 +152,10 @@ enum Format {
         ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file)
     }
 
+    static func bytes(_ value: UInt64?) -> String {
+        value.map { bytes($0) } ?? "size unknown"
+    }
+
     static func relative(ms: Int64?) -> String {
         guard let ms, ms > 0 else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)

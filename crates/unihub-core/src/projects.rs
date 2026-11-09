@@ -88,6 +88,14 @@ impl ProjectStore {
         Ok(self.get(&path).expect("just inserted"))
     }
 
+    /// Adds a project that is still being created, so it is listed right away. `path` must
+    /// already be absolute and canonical (the folder may not exist yet).
+    pub fn add_pending(&mut self, path: &str, now_ms: i64) -> Result<()> {
+        let entry = self.projects.entry(path.to_string()).or_default();
+        entry.last_opened_ms = Some(now_ms);
+        self.save()
+    }
+
     pub fn remove(&mut self, path: &str) -> Result<()> {
         self.projects
             .remove(path)
@@ -281,6 +289,20 @@ mod tests {
 
         store.remove(&path_string(&project)).unwrap();
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn lists_a_project_while_it_is_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = ProjectStore::open(&tmp.path().join("data"), None).unwrap();
+        let path = path_string(&fs::canonicalize(tmp.path()).unwrap().join("New"));
+        store.add_pending(&path, 42).unwrap();
+        let listed = store.get(&path).unwrap();
+        assert!(!listed.exists);
+        assert_eq!(listed.title, "New");
+        assert_eq!(listed.last_opened_ms, Some(42));
+        make_project(tmp.path(), "New", "6000.0.85f1");
+        assert!(store.get(&path).unwrap().exists);
     }
 
     #[test]

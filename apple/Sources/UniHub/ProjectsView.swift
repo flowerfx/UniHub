@@ -80,6 +80,19 @@ struct ProjectsView: View {
             }
             .width(28)
         }
+        // Projects being created, with their progress, above the list.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !model.createJobs.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(model.createJobs, id: \.id) { job in
+                        JobRow(model: model, job: job)
+                            .padding(.horizontal, 12)
+                    }
+                    Divider()
+                }
+                .background(.bar)
+            }
+        }
         .inspector(isPresented: $model.showDetails) {
             ProjectDetailsView(model: model)
                 .inspectorColumnWidth(min: 300, ideal: 360, max: 520)
@@ -144,6 +157,9 @@ struct ProjectsView: View {
         .navigationSubtitle("\(model.projects.count) projects")
         .toolbar {
             ToolbarItemGroup {
+                Button("New Project", systemImage: "plus.rectangle.on.folder") { model.isCreatingProject = true }
+                    .labelStyle(.titleAndIcon)
+                    .help("Create a project from a template (⌘N)")
                 Button("Import from Unity Hub", systemImage: "square.and.arrow.down") {
                     Task { await model.importFromHub() }
                 }
@@ -174,11 +190,14 @@ struct ProjectsView: View {
         }
         .overlay {
             if model.projects.isEmpty {
-                ContentUnavailableView(
-                    "No projects",
-                    systemImage: "folder.badge.plus",
-                    description: Text("Add a project folder, or import your list from Unity Hub.")
-                )
+                ContentUnavailableView {
+                    Label("No projects", systemImage: "folder.badge.plus")
+                } description: {
+                    Text("Create a project from a template, add a project folder, or import your list from Unity Hub.")
+                } actions: {
+                    Button("New Project…") { model.isCreatingProject = true }
+                    Button("Add Project…") { model.isAddingProject = true }
+                }
             }
         }
     }
@@ -190,7 +209,12 @@ private struct EditorVersionCell: View {
     let project: Project
 
     var body: some View {
-        if let version = project.editorVersion {
+        if model.creatingJob(path: project.path) != nil {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Creating…").foregroundStyle(.secondary)
+            }
+        } else if let version = project.editorVersion {
             HStack(spacing: 4) {
                 Text(version).monospacedDigit()
                 if !model.isInstalled(version) {

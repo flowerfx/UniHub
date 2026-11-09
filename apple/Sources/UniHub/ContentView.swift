@@ -50,6 +50,7 @@ struct ContentView: View {
         // Lets the Dock icon reopen this window after it was closed.
         .onAppear { MainWindow.openAction = openWindow }
         .sheet(item: $model.cleanup) { _ in CleanupView(model: model) }
+        .sheet(isPresented: $model.isCreatingProject) { NewProjectSheet(model: model) }
         .sheet(item: $model.availableUpdate) { update in UpdateSheet(model: model, update: update) }
         .alert(
             "Check for Updates",
@@ -63,6 +64,8 @@ struct ContentView: View {
         .task {
             // Development aid: `-openSettings YES` opens Settings at launch.
             if UserDefaults.standard.bool(forKey: "openSettings") { openSettings() }
+            // Development aid: `-newProject YES` opens the New Project sheet at launch.
+            if UserDefaults.standard.bool(forKey: "newProject") { model.isCreatingProject = true }
             await model.refreshAccount()
         }
         .alert(

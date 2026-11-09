@@ -17,6 +17,27 @@ enum Cmd {
     Projects,
     /// Add a project folder to the list.
     Add { path: String },
+    /// List the templates a new project can start from with an editor (↓ = downloaded on
+    /// first use).
+    Templates {
+        /// Editor version (default: the newest installed).
+        #[arg(long)]
+        editor: Option<String>,
+    },
+    /// Create a project from a template and open it in Unity, like the Hub's "New project".
+    New {
+        /// Project name (default: "My project", numbered if taken).
+        name: Option<String>,
+        /// Parent folder (default: the default project location from the settings).
+        #[arg(long)]
+        path: Option<String>,
+        /// Editor version (default: the newest installed).
+        #[arg(long)]
+        editor: Option<String>,
+        /// Template id, e.g. com.unity.template.urp-blank (default: the first core one).
+        #[arg(long)]
+        template: Option<String>,
+    },
     /// Remove a project from the list (the folder is not touched).
     Remove { path: String },
     /// Open a project (path or exact title) in its editor, or in --editor.
@@ -199,6 +220,49 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
             println!("added {} ({})", p.title, p.editor_version.as_deref().unwrap_or("?"));
         }
         Cmd::Remove { path } => unihub.remove_project(path)?,
+        Cmd::Templates { editor } => {
+            let editor = pick_editor(&unihub, editor)?;
+            let catalog = unihub.project_templates(editor.version.clone(), editor.architecture.clone())?;
+            println!("Templates for Unity {}:", editor.version);
+            for t in &catalog.templates {
+                let state = match t.download_bytes {
+                    _ if t.archive_path.is_some() => "  ".to_string(),
+                    Some(b) => format!("↓ {}", human_bytes(b)),
+                    None => "↓".into(),
+                };
+                let pipeline = t.render_pipeline.as_deref().unwrap_or("");
+                println!(
+                    "  {:<34} {:<9} {:<9} {:<10} {:<12} {}",
+                    t.display_name, format!("{:?}", t.kind), pipeline, t.version, state, t.id
+                );
+            }
+            if let Some(note) = catalog.note {
+                println!("\n{note}");
+            }
+        }
+        Cmd::New { name, path, editor, template } => {
+            let editor = pick_editor(&unihub, editor)?;
+            let parent = path.unwrap_or_else(|| unihub.default_project_location());
+            let name = name.unwrap_or_else(|| unihub.suggest_project_name(parent.clone()));
+            let folder = unihub.check_new_project(parent.clone(), name.clone())?;
+            let template = match template {
+                Some(t) => t,
+                None => {
+                    let catalog = unihub.project_templates(editor.version.clone(), editor.architecture.clone())?;
+                    catalog
+                        .templates
+                        .iter()
+                        .find(|t| t.archive_path.is_some())
+                        .map(|t| t.id.clone())
+                        .ok_or_else(|| UniHubError::InvalidData {
+                            message: format!("Unity {} has no templates on this Mac; pass --template", editor.version),
+                        })?
+                }
+            };
+            println!("Creating {folder} with Unity {} from {template}", editor.version);
+            let id = unihub.create_project(parent, name, editor.version, editor.architecture, template)?;
+            follow_job(&unihub, id)?;
+        }
         Cmd::Open { project, editor } => {
             let path = resolve_project(&unihub, &project)?;
             unihub.open_project(path.clone(), editor)?;
@@ -473,8 +537,8 @@ fn follow_job(unihub: &UniHub, id: u64) -> Result<(), UniHubError> {
             JobState::Cancelled => return Err(UniHubError::Cancelled),
             JobState::Failed => {
                 return Err(UniHubError::CliFailed {
-                    code: "INSTALL_FAILED".into(),
-                    message: job.error.unwrap_or_else(|| "the install failed".into()),
+                    code: "JOB_FAILED".into(),
+                    message: job.error.unwrap_or_else(|| "the job failed".into()),
                 });
             }
         }
@@ -487,6 +551,15 @@ fn human_bytes(bytes: u64) -> String {
         b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
         b if b >= 1_000 => format!("{:.0} KB", b as f64 / 1e3),
         b => format!("{b} B"),
+    }
+}
+
+/// The editor with this version, or the newest installed one.
+fn pick_editor(unihub: &UniHub, version: Option<String>) -> Result<unihub_core::Editor, UniHubError> {
+    let editors = unihub.list_editors();
+    match version {
+        Some(v) => editors.into_iter().find(|e| e.version == v).ok_or(UniHubError::EditorNotInstalled { version: v }),
+        None => editors.into_iter().next().ok_or(UniHubError::InvalidData { message: "no editor is installed".into() }),
     }
 }
 

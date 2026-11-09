@@ -1,5 +1,5 @@
-//! Long-running Unity CLI commands (editor and module installs) that run in the
-//! background. The CLI is started with `--format ndjson`, which prints one JSON object per
+//! Long-running work in the background: Unity CLI commands (editor and module installs)
+//! and creating projects. The CLI is started with `--format ndjson`, which prints one JSON object per
 //! line: `{"type":"progress","pct":50,"msg":"Installing iOS Build Support...","phase":"install"}`
 //! while it works and `{"type":"result","success":…,"errors":[…]}` at the end. The app
 //! polls `UniHub::jobs()` to show progress.
@@ -11,18 +11,20 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{Result, UniHubError};
 use crate::unity_cli;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum JobKind {
     InstallEditor,
     InstallModules,
+    /// Downloading the template if needed, then starting the editor on the new project.
+    CreateProject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -42,6 +44,8 @@ pub struct Job {
     pub architecture: String,
     /// Module ids requested (for an editor install: the modules installed with it).
     pub module_ids: Vec<String>,
+    /// The project being created (`CreateProject`).
+    pub project_path: Option<String>,
     pub state: JobState,
     /// Latest progress message, e.g. "Downloading iOS Build Support...".
     pub message: String,
@@ -59,6 +63,8 @@ pub(crate) struct JobRunner {
     jobs: Arc<Mutex<Vec<Job>>>,
     /// Process (group) id of each running job's CLI.
     pids: Arc<Mutex<HashMap<u64, u32>>>,
+    /// Cancel flags of running tasks (`spawn_task`).
+    flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     next_id: AtomicU64,
 }
 
@@ -84,21 +90,7 @@ impl JobRunner {
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         let mut child = cmd.spawn()?;
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.jobs).push(Job {
-            id,
-            kind,
-            version: version.to_string(),
-            architecture: architecture.to_string(),
-            module_ids,
-            state: JobState::Running,
-            message: "Starting…".into(),
-            phase: None,
-            percent: None,
-            error: None,
-            started_ms: crate::now_ms(),
-            finished_ms: None,
-        });
+        let id = self.add(kind, version, architecture, module_ids, None);
         lock(&self.pids).insert(id, child.id());
 
         let stdout = child.stdout.take();
@@ -138,22 +130,105 @@ impl JobRunner {
         Ok(id)
     }
 
+    /// Runs `work` on a background thread as a job and returns its id. `work` reports
+    /// progress through the `Task`, checks it for cancellation, and returns the message
+    /// shown when it succeeds.
+    pub fn spawn_task<F>(
+        &self,
+        kind: JobKind,
+        version: &str,
+        architecture: &str,
+        project_path: Option<String>,
+        work: F,
+    ) -> u64
+    where
+        F: FnOnce(&Task) -> Result<String> + Send + 'static,
+    {
+        let id = self.add(kind, version, architecture, Vec::new(), project_path);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        lock(&self.flags).insert(id, Arc::clone(&cancelled));
+        let task = Task { id, jobs: Arc::clone(&self.jobs), pids: Arc::clone(&self.pids), cancelled };
+        let flags = Arc::clone(&self.flags);
+        std::thread::spawn(move || {
+            let result = work(&task);
+            lock(&flags).remove(&id);
+            lock(&task.pids).remove(&id);
+            update(&task.jobs, id, |job| {
+                if job.state == JobState::Running {
+                    match result {
+                        Ok(message) => {
+                            job.state = JobState::Succeeded;
+                            job.message = message;
+                            job.percent = Some(100.0);
+                        }
+                        Err(UniHubError::Cancelled) => {
+                            job.state = JobState::Cancelled;
+                            job.message = "Cancelled".into();
+                        }
+                        Err(e) => {
+                            job.state = JobState::Failed;
+                            job.error = Some(e.to_string());
+                        }
+                    }
+                }
+                job.finished_ms = Some(crate::now_ms());
+            });
+        });
+        id
+    }
+
+    fn add(
+        &self,
+        kind: JobKind,
+        version: &str,
+        architecture: &str,
+        module_ids: Vec<String>,
+        project_path: Option<String>,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        lock(&self.jobs).push(Job {
+            id,
+            kind,
+            version: version.to_string(),
+            architecture: architecture.to_string(),
+            module_ids,
+            project_path,
+            state: JobState::Running,
+            message: "Starting…".into(),
+            phase: None,
+            percent: None,
+            error: None,
+            started_ms: crate::now_ms(),
+            finished_ms: None,
+        });
+        id
+    }
+
     pub fn list(&self) -> Vec<Job> {
         lock(&self.jobs).clone()
     }
 
-    /// Stops a running job's CLI (and the installers it started).
+    /// Stops a running job: its CLI (and the installers it started), or a task, which
+    /// stops at its next check and has the process it started stopped.
     pub fn cancel(&self, id: u64) {
         let pid = lock(&self.pids).get(&id).copied();
-        let Some(pid) = pid else { return };
+        let flag = lock(&self.flags).get(&id).cloned();
+        if pid.is_none() && flag.is_none() {
+            return;
+        }
         update(&self.jobs, id, |job| {
             if job.state == JobState::Running {
                 job.state = JobState::Cancelled;
                 job.message = "Cancelled".into();
             }
         });
-        // Negative pid: the whole process group.
-        let _ = Command::new("/bin/kill").args(["-TERM", "--", &format!("-{pid}")]).status();
+        if let Some(flag) = flag {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(pid) = pid {
+            // Negative pid: the whole process group.
+            let _ = Command::new("/bin/kill").args(["-TERM", "--", &format!("-{pid}")]).status();
+        }
     }
 
     /// Forgets a finished job.
@@ -165,6 +240,42 @@ impl JobRunner {
         lock(&self.jobs)
             .iter()
             .any(|j| j.state == JobState::Running && j.version == version && j.architecture == architecture)
+    }
+}
+
+/// A running `spawn_task` job, as its work sees it.
+pub(crate) struct Task {
+    id: u64,
+    jobs: Arc<Mutex<Vec<Job>>>,
+    pids: Arc<Mutex<HashMap<u64, u32>>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Task {
+    pub fn progress(&self, message: impl Into<String>, phase: Option<&str>, percent: Option<f64>) {
+        let message = message.into();
+        update(&self.jobs, self.id, |job| {
+            job.message = message;
+            job.phase = phase.map(str::to_string);
+            job.percent = percent.map(|p| p.clamp(0.0, 100.0));
+        });
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// `Err(Cancelled)` once the job was cancelled.
+    pub fn check(&self) -> Result<()> {
+        if self.is_cancelled() { Err(UniHubError::Cancelled) } else { Ok(()) }
+    }
+
+    /// The process group cancelling should stop, or `None` once there is nothing to stop.
+    pub fn set_process_group(&self, pid: Option<u32>) {
+        match pid {
+            Some(pid) => lock(&self.pids).insert(self.id, pid),
+            None => lock(&self.pids).remove(&self.id),
+        };
     }
 }
 
@@ -332,6 +443,39 @@ mod tests {
         assert_eq!(job.percent, Some(100.0));
         runner.dismiss(id);
         assert!(runner.list().is_empty());
+    }
+
+    #[test]
+    fn runs_and_cancels_tasks() {
+        let runner = JobRunner::default();
+        let done = runner.spawn_task(JobKind::CreateProject, "6000.0.1f1", "arm64", Some("/p".into()), |task| {
+            task.progress("Downloading…", Some("download"), Some(150.0));
+            Ok("Created".into())
+        });
+        let failing = runner.spawn_task(JobKind::CreateProject, "6000.0.1f1", "arm64", None, |_| {
+            Err(UniHubError::InvalidData { message: "boom".into() })
+        });
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let slow = runner.spawn_task(JobKind::CreateProject, "6000.0.1f1", "arm64", None, move |task| {
+            rx.recv().unwrap();
+            task.check()?;
+            Ok("never".into())
+        });
+        runner.cancel(slow);
+        tx.send(()).unwrap();
+        for _ in 0..100 {
+            if runner.list().iter().all(|j| j.finished_ms.is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let get = |id| runner.list().into_iter().find(|j| j.id == id).unwrap();
+        assert_eq!(get(done).state, JobState::Succeeded);
+        assert_eq!(get(done).message, "Created");
+        assert_eq!(get(done).project_path.as_deref(), Some("/p"));
+        assert_eq!(get(failing).state, JobState::Failed);
+        assert!(get(failing).error.unwrap().contains("boom"));
+        assert_eq!(get(slow).state, JobState::Cancelled);
     }
 
     #[test]
