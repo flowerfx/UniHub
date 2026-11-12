@@ -18,6 +18,8 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("CoreFoundation"),
+                // The core reads the official Hub's hub.db with the SQLite that ships with macOS.
+                .linkedLibrary("sqlite3"),
             ]
         ),
         .executableTarget(name: "UniHub", dependencies: ["UniHubCore"], path: "Sources/UniHub"),

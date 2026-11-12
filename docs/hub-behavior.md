@@ -15,8 +15,8 @@ sign-in internals are deliberately out of scope.
 
 | File | Purpose | Format |
 |---|---|---|
-| `projects-v1.json` | Project list (the Hub also mirrors it into `hub.db`) | `{"schema_version":"v1","data":{"<abs path>": Project}}` |
-| `hub.db` | SQLite: `projects(path TEXT PK, data TEXT JSON, updated_at INT)`, `meta(key,value)` | SQLite (WAL) |
+| `hub.db` | The project list (Hub 3.22.6): `projects(path TEXT PK, data TEXT JSON, updated_at INT)`, one `Project` per row; `meta(key,value)` | SQLite (WAL) |
+| `projects-v1.json` | The project list of older Hubs. Hub 3.22.6 copied it into `hub.db` once (`meta.projects_json_migrated = 1`) and no longer updates it | `{"schema_version":"v1","data":{"<abs path>": Project}}` |
 | `editors-v2.json` | Editors added manually from outside the install folder | `{"schema_version":"2","data":[]}` |
 | `excludedEditorFolders.json` | Editors the user removed from the list | `{"schema_version":"1","data":[]}` |
 | `secondaryInstallPath.json` | Custom editor install root. `""` means the default | JSON string |
@@ -28,7 +28,19 @@ sign-in internals are deliberately out of scope.
 | `releases.json` | Old cached release list (legacy) | JSON |
 | `accounts.db`, `Cookies`, … | Auth/session. **Do not read or touch** | — |
 
-### Project entry (`projects-v1.json` → `data[path]`)
+The Hub keeps `hub.db` open in WAL mode, so recent changes are often only in `hub.db-wal`.
+The Unity CLI uses the same folder and writes `hub.db` too (e.g. `unity projects link
+cloud`, §12). Observed with Hub 3.22.6 on 2026-11-12: a project added in the Hub on
+2026-11-09 was only in `hub.db`; `projects-v1.json` was last written on 2026-11-08.
+
+**How UniHub reads it:** "Import from Unity Hub" and the first launch take the union of
+both files by path (`hub.db` wins where both have a project), so older Hubs keep working.
+A missing file counts as empty and an unreadable one is skipped. `hub.db` is never opened
+in place, because even a read-only SQLite connection writes its locks into `hub.db-shm`:
+UniHub copies `hub.db` and `hub.db-wal` into a temporary folder (again if `hub.db` changed
+during the copy, as a checkpoint would) and reads the copy.
+
+### Project entry (`hub.db` → `projects.data`, `projects-v1.json` → `data[path]`)
 
 ```jsonc
 {
@@ -347,10 +359,10 @@ The Hub does not use the Unity CLI for this. It starts the editor directly, as a
   to sign-in and are not replicated.
 - For an editor without a `ProjectTemplates` folder, the Hub falls back to
   `-projectTemplate 0|1` (old built-in 3D/2D).
-- The project is added to `projects-v1.json` right after the editor starts (title, path,
-  version, architecture, now as `lastModified`), without waiting for the editor. It is taken
-  off again if the editor fails before the folder is a Unity project. Other fields are
-  filled in by later refreshes.
+- The project is added to the Hub's project list (§1) right after the editor starts
+  (title, path, version, architecture, now as `lastModified`), without waiting for the
+  editor. It is taken off again if the editor fails before the folder is a Unity project.
+  Other fields are filled in by later refreshes.
 - Custom templates may ask for `%PROJECT_NAME%` to be replaced in some of their files
   (`hasProjectNamePlaceholder`, `rootFiles` in `package.json`); the Hub repacks such a
   template before launching.
@@ -378,9 +390,9 @@ The Hub does not use the Unity CLI for this. It starts the editor directly, as a
 
 ## 11. Scope of UniHub
 
-In scope: project list (compatible with `projects-v1.json`, read-only), creating projects
-from templates, editor discovery, release browsing, launching, settings, a CLI,
-connecting projects to Unity Cloud (§12), and account, license and tool management
+In scope: project list (imported from `hub.db` and `projects-v1.json`, read-only),
+creating projects from templates, editor discovery, release browsing, launching, settings,
+a CLI, connecting projects to Unity Cloud (§12), and account, license and tool management
 **through the official Unity CLI**.
 
 Out of scope: reimplementing Unity's sign-in, token handling or licensing protocols,

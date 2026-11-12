@@ -19,6 +19,7 @@ plist = "1"
 flate2 = "1"
 tar = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "native-tls"] }
-
-[dev-dependencies]
+# Reads the official Hub's project list in `hub.db`. Links the SQLite that ships with
+# macOS (no `bundled` feature), so the app does not carry its own copy.
+rusqlite = { version = "0.42", default-features = false }
 tempfile = "3"

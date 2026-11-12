@@ -13,7 +13,9 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
 
 - **Projects:** your projects with editor version and last-modified time. Search,
   favourite, open, open with a specific editor, show in Finder. UniHub imports the
-  official Hub's project list (read-only: it never writes to the Hub's files).
+  official Hub's project list from its `hub.db` (where Hub 3.22 keeps it) and the older
+  `projects-v1.json`, read-only: it reads a copy of `hub.db` and never writes to the Hub's
+  files.
 - **New projects:** **New Project** (⌘N) creates a project from a template, like the Hub's
   "New project": pick an installed editor, then a template (Core, Sample, Learning,
   Custom, New) with its preview, render pipeline and platforms, a name ("My project",

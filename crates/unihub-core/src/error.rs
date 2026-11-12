@@ -51,6 +51,12 @@ impl From<serde_json::Error> for UniHubError {
     }
 }
 
+impl From<rusqlite::Error> for UniHubError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::InvalidData { message: e.to_string() }
+    }
+}
+
 impl From<reqwest::Error> for UniHubError {
     fn from(e: reqwest::Error) -> Self {
         Self::Network { message: e.to_string() }

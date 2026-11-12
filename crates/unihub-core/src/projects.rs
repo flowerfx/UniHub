@@ -1,6 +1,7 @@
 //! The project list. UniHub keeps its own list in `<data_dir>/projects.json` and can
-//! import entries from the official Hub's `projects-v1.json`. It never writes to the
-//! Hub's files.
+//! import entries from the official Hub's list: the `projects` table of `hub.db` (where
+//! Hub 3.22 keeps it) together with the older `projects-v1.json`. It never writes to the
+//! Hub's files: `hub.db` is read from a private copy.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,13 +119,8 @@ impl ProjectStore {
     /// Adds every project the official Hub knows about that UniHub does not have yet.
     /// Returns how many were added.
     pub fn import_from_hub(&mut self, hub_data_dir: &Path) -> Result<u32> {
-        let file = hub_data_dir.join("projects-v1.json");
-        if !file.exists() {
-            return Ok(0);
-        }
-        let parsed: HubProjectsFile = serde_json::from_str(&fs::read_to_string(&file)?)?;
         let mut added = 0;
-        for (path, entry) in parsed.data {
+        for (path, entry) in read_hub_projects(hub_data_dir)? {
             if self.projects.contains_key(&path) {
                 continue;
             }
@@ -158,11 +154,98 @@ struct HubProjectsFile {
     data: BTreeMap<String, HubProjectEntry>,
 }
 
-#[derive(Deserialize)]
+/// The subset of a Hub project entry that UniHub reads. `projects-v1.json` and `hub.db`
+/// store the same shape.
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HubProjectEntry {
     #[serde(default)]
     is_favorite: bool,
+}
+
+/// The official Hub's project list: `hub.db` and `projects-v1.json` merged by path, with
+/// `hub.db` winning where both have a project. Hub 3.22.6 keeps its list in `hub.db` and no
+/// longer updates the JSON file, which older Hubs use. A missing source counts as
+/// empty, and an unreadable one is skipped while the other can be read.
+fn read_hub_projects(hub_data_dir: &Path) -> Result<BTreeMap<String, HubProjectEntry>> {
+    let json = hub_data_dir.join("projects-v1.json");
+    let db = hub_data_dir.join("hub.db");
+    // The JSON file first, so that `hub.db` overwrites it.
+    let sources = [
+        json.exists().then(|| read_hub_projects_json(&json)),
+        db.exists().then(|| read_hub_db(&db)),
+    ];
+    let mut merged = BTreeMap::new();
+    let mut read_any = false;
+    let mut first_error = None;
+    for result in sources.into_iter().flatten() {
+        match result {
+            Ok(projects) => {
+                merged.extend(projects);
+                read_any = true;
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match first_error {
+        Some(e) if !read_any => Err(e),
+        _ => Ok(merged),
+    }
+}
+
+fn read_hub_projects_json(file: &Path) -> Result<BTreeMap<String, HubProjectEntry>> {
+    let parsed: HubProjectsFile = serde_json::from_str(&fs::read_to_string(file)?)?;
+    Ok(parsed.data)
+}
+
+/// Reads the `projects(path, data, updated_at)` table of the Hub's `hub.db`. The Hub keeps
+/// the database open in WAL mode, and even a read-only SQLite connection to it would write
+/// its read locks into the shared `-shm` file (creating it if missing). So the database and
+/// its `-wal` are copied into a temporary folder and only the copy is opened.
+fn read_hub_db(db: &Path) -> Result<BTreeMap<String, HubProjectEntry>> {
+    let tmp = tempfile::tempdir()?;
+    let copy = snapshot_hub_db(db, tmp.path())?;
+    let conn = rusqlite::Connection::open(&copy)?;
+    let mut stmt = conn.prepare("SELECT path, data FROM projects")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut projects = BTreeMap::new();
+    for row in rows {
+        let (path, data) = row?;
+        // An entry whose details cannot be read is still a project the Hub lists.
+        projects.insert(path, serde_json::from_str(&data).unwrap_or_default());
+    }
+    Ok(projects)
+}
+
+/// Copies `hub.db` and `hub.db-wal` into `dir` and returns the copied database. The `-shm`
+/// index is left behind; SQLite rebuilds it from the `-wal`. Committed changes the Hub
+/// adds to the `-wal` while it is copied are fine (SQLite ignores an unfinished
+/// transaction at its end), but a checkpoint writes into `hub.db` itself and would leave
+/// the copies out of step, so the copy is repeated if `hub.db` changed meanwhile.
+fn snapshot_hub_db(db: &Path, dir: &Path) -> Result<PathBuf> {
+    let stamp = || fs::metadata(db).and_then(|m| Ok((m.len(), m.modified()?))).ok();
+    let mut wal_name = db.as_os_str().to_owned();
+    wal_name.push("-wal");
+    let wal = PathBuf::from(wal_name);
+    let copy = dir.join("hub.db");
+    let wal_copy = dir.join("hub.db-wal");
+    for _ in 0..5 {
+        let before = stamp();
+        fs::copy(db, &copy)?;
+        match fs::copy(&wal, &wal_copy) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(&wal_copy);
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if before.is_some() && stamp() == before {
+            return Ok(copy);
+        }
+    }
+    Err(UniHubError::Io { message: format!("{} kept changing while it was read", db.display()) })
 }
 
 fn normalize(path: &str) -> String {
@@ -293,6 +376,107 @@ mod tests {
 
         store.remove(&path_string(&project)).unwrap();
         assert!(store.list().is_empty());
+    }
+
+    /// A `hub.db` the way Hub 3.22 leaves it: WAL mode, with the connection still open and
+    /// nothing checkpointed, so the table and its rows exist only in `hub.db-wal`.
+    fn open_hub_db(hub: &Path, rows: &[(&str, serde_json::Value)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(hub.join("hub.db")).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, "wal");
+        conn.execute_batch(
+            "PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE projects (path TEXT PRIMARY KEY, data TEXT NOT NULL,
+                                    updated_at INTEGER NOT NULL);
+             INSERT INTO meta VALUES ('projects_json_migrated', '1');",
+        )
+        .unwrap();
+        for (path, data) in rows {
+            conn.execute(
+                "INSERT INTO projects VALUES (?1, ?2, 1794477422490)",
+                (path, data.to_string()),
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn write_projects_json(hub: &Path, data: serde_json::Value) {
+        let body = serde_json::json!({ "schema_version": "v1", "data": data });
+        fs::write(hub.join("projects-v1.json"), body.to_string()).unwrap();
+    }
+
+    fn read_dir_contents(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), fs::read(&p).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn imports_the_union_of_hub_db_and_projects_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        fs::create_dir_all(&hub).unwrap();
+        // Only in the JSON file (a Hub that has not moved to hub.db, or an old entry).
+        // In both, favourite in hub.db only: hub.db is the Hub's current list.
+        write_projects_json(
+            &hub,
+            serde_json::json!({
+                "/p/OnlyInJson": { "title": "OnlyInJson", "isFavorite": true },
+                "/p/Both": { "title": "Both", "isFavorite": false },
+            }),
+        );
+        let _hub_open = open_hub_db(
+            &hub,
+            &[
+                ("/p/Both", serde_json::json!({ "title": "Both", "isFavorite": true })),
+                ("/p/OnlyInDb", serde_json::json!({ "title": "OnlyInDb", "lastModified": null })),
+                ("/p/Unreadable", serde_json::json!("not an object")),
+            ],
+        );
+        assert!(hub.join("hub.db-wal").exists());
+        let hub_before = read_dir_contents(&hub);
+
+        let mut store = ProjectStore::open(&tmp.path().join("data"), None).unwrap();
+        assert_eq!(store.import_from_hub(&hub).unwrap(), 4);
+        let favorites: Vec<(String, bool)> =
+            store.list().into_iter().map(|p| (p.path, p.is_favorite)).collect();
+        assert_eq!(
+            favorites,
+            [
+                ("/p/Both".to_string(), true),
+                ("/p/OnlyInDb".to_string(), false),
+                ("/p/OnlyInJson".to_string(), true),
+                ("/p/Unreadable".to_string(), false),
+            ]
+        );
+        assert_eq!(store.import_from_hub(&hub).unwrap(), 0);
+
+        // Not a byte of the Hub's folder changed, and no file was added to it.
+        assert_eq!(read_dir_contents(&hub), hub_before);
+    }
+
+    #[test]
+    fn falls_back_to_projects_json_when_hub_db_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        fs::create_dir_all(&hub).unwrap();
+
+        // Neither file: nothing to import.
+        let mut store = ProjectStore::open(&tmp.path().join("data"), None).unwrap();
+        assert_eq!(store.import_from_hub(&hub).unwrap(), 0);
+
+        // Only hub.db, and it is not a database: the error is reported.
+        fs::write(hub.join("hub.db"), b"not a database").unwrap();
+        assert!(store.import_from_hub(&hub).is_err());
+
+        // With projects-v1.json next to it, that file is used.
+        write_projects_json(&hub, serde_json::json!({ "/p/Game": { "isFavorite": true } }));
+        assert_eq!(store.import_from_hub(&hub).unwrap(), 1);
+        assert!(store.get("/p/Game").unwrap().is_favorite);
     }
 
     #[test]
