@@ -8,6 +8,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod clean;
+pub mod cloud;
 pub mod create;
 pub mod details;
 pub mod editors;
@@ -30,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use clean::{CleanItem, CleanKind, CleanMethod, CleanPlan, CleanResult};
+pub use cloud::{CloudLink, CloudOrganization, CloudProject};
 pub use details::{FolderSize, ProjectDetails, ProjectSize};
 pub use editors::Editor;
 pub use error::{Result, UniHubError};
@@ -185,6 +187,32 @@ impl UniHub {
     pub fn clean_project(&self, path: String, items: Vec<String>) -> Result<CleanResult> {
         self.existing_project(&path)?;
         clean::clean(Path::new(&path), &items)
+    }
+
+    // ---- Unity Cloud ------------------------------------------------------------------
+
+    /// Organizations of the signed-in Unity account (uses the Unity CLI).
+    pub fn cloud_organizations(&self) -> Result<Vec<CloudOrganization>> {
+        cloud::organizations(&self.cli_path()?)
+    }
+
+    /// Cloud projects of an organization (its id, numeric id or name), archived ones left out.
+    pub fn cloud_projects(&self, organization: String) -> Result<Vec<CloudProject>> {
+        cloud::projects(&self.cli_path()?, &organization)
+    }
+
+    /// Connects a listed project to an existing Unity Cloud project, like the Hub's
+    /// "Connect to Unity Cloud". Refused while the project is open in Unity.
+    pub fn connect_cloud_project(&self, path: String, cloud_project: CloudProject) -> Result<()> {
+        self.existing_project(&path)?;
+        cloud::connect(Path::new(&path), &cloud_project)
+    }
+
+    /// Disconnects a listed project from Unity Cloud; the cloud project itself stays.
+    /// Refused while the project is open in Unity.
+    pub fn disconnect_cloud_project(&self, path: String) -> Result<()> {
+        self.existing_project(&path)?;
+        cloud::disconnect(Path::new(&path), self.cli_path().ok().as_deref())
     }
 
     /// Adds projects from the official Hub that UniHub does not list yet.

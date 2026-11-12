@@ -379,9 +379,82 @@ The Hub does not use the Unity CLI for this. It starts the editor directly, as a
 ## 11. Scope of UniHub
 
 In scope: project list (compatible with `projects-v1.json`, read-only), creating projects
-from templates, editor discovery, release browsing, launching, settings, a CLI, and
-account, license and tool management **through the official Unity CLI**. Next: downloading
-and installing editors and modules.
+from templates, editor discovery, release browsing, launching, settings, a CLI,
+connecting projects to Unity Cloud (§12), and account, license and tool management
+**through the official Unity CLI**.
 
 Out of scope: reimplementing Unity's sign-in, token handling or licensing protocols,
-cloud/organisation features, Learn, Community.
+other cloud/organisation features (creating cloud projects, members, services), Learn,
+Community.
+
+## 12. Connecting a project to Unity Cloud
+
+Observed with REA (Hub 3.22.6 main-process and renderer modules, the Hub's logs, its
+`hub.db` read-only), Unity CLI 1.0.0-beta.17 and throwaway test projects, 2026-11-12.
+
+### What a connection is
+
+- Three fields of the PlayerSettings block in `ProjectSettings/ProjectSettings.asset`:
+  `cloudProjectId`, `organizationId` and `projectName` (the cloud project's name). The Hub
+  counts a project as connected when both ids are non-empty. An unset field is written
+  `key: ` (a trailing space after the colon). `cloudEnabled` is not touched by connecting
+  or disconnecting.
+- `organizationId` is found in three forms: the organization's numeric ("genesis") id, as
+  the Hub writes it; its UUID, as the Unity CLI writes it; and its name, as the editor
+  writes it after it opens the project. Each is accepted.
+
+### Unity Hub
+
+- **Connect to Unity Cloud** (project row menu, project details): refused while the
+  project is open in an editor. The dialog lists the account's organizations and, for the
+  chosen one, its cloud projects (Unity's gateway API, by numeric organization id); it can
+  also create a new cloud project with a typed name when the user may create projects in
+  that organization. Linking itself makes no server call: the Hub checks that the cloud
+  project id is a version 1–5 UUID, then replaces the three lines in place, keeping their
+  indentation (`organizationId` = numeric id, `cloudProjectId`, `projectName` = cloud
+  project name). The rest of the file is unchanged. It records `cloudProjectId`,
+  `organizationId`, `genesisOrgId` and `projectName` on the project's list entry and shows
+  a "connected" notification.
+- **Disconnect**: after a confirmation, the three fields are emptied and the list entry's
+  cloud ids cleared. For a project in Unity Version Control the Hub also disconnects the
+  UVCS workspace.
+- **Changes made outside the Hub**: the Hub re-reads `ProjectSettings.asset` when it
+  refreshes (for example when its window gains focus). Ids that appear in the file are
+  taken over (logged as "Project connected to Unity Cloud: <path>", with the
+  notification). Ids that disappear are not: the Hub keeps the ids it holds in memory and
+  saves them back to its list. While the Hub runs, its list therefore keeps showing a
+  project as connected after a disconnect made elsewhere, including with
+  `unity projects unlink cloud`. This only affects the Hub's list: opening a project from
+  the Hub passes no cloud arguments, so the editor goes by the file.
+- Hub 3.22.6 keeps its project list in `hub.db`; `projects-v1.json` was not updated by any
+  of these operations.
+
+### Unity CLI
+
+- `unity cloud org --json` → `organizations[]` with `id` (UUID), `genesisId`, `name`,
+  `role`, `isDefault`. `unity cloud project --cloud-org <id|name> --json` → `projects[]`
+  with `id`, `name`, `organizationId`, `organizationGenesisId`, `archivedAt`, … (without
+  `--cloud-org` and no default organization: `CLOUD_NEEDS_ACTIVE_ORG`).
+- `unity projects link cloud <path> --cloud-org <org> --cloud-project <id|name>` and
+  `unity projects unlink cloud <path>` work only for projects in the Hub's list; otherwise
+  they fail with "No registered project found" (`PROJECT_NOT_FOUND`, or
+  `PROJECTS_UNLINK_CLOUD_ERROR` for unlink). Link writes the organization's UUID and the
+  *local* project's folder name as `projectName`, unlike the Hub, and updates the list
+  entry; without a project it creates a new cloud project. Unlink restores the file
+  byte for byte to its unset state and clears the list entry.
+
+### How UniHub does it
+
+- **Connect:** organizations and cloud projects come from the Unity CLI (the sign-in stays
+  with it; archived cloud projects are left out). UniHub then writes the three fields
+  itself, with the Hub's values: numeric organization id (the UUID when there is none) and
+  the cloud project's name, single-quoted when YAML needs it. It keeps line endings, writes
+  through a temporary file, and refuses while the project is open in Unity or when the file
+  has no such fields. Checked against the running Hub: on its next refresh it logged the
+  connection and its `hub.db` entry held the same ids and name as after a Hub connect.
+- **Disconnect:** `unity projects unlink cloud` first, so the Hub's list entry is cleared
+  as well, then the same edit directly when the fields are still set (projects the Hub does
+  not list, or no CLI). The file ends up byte-identical to its unset state. The UVCS
+  workspace is left alone. When the Hub is running, the confirmation says that its list
+  may keep showing the project as connected.
+- Not done: creating a new cloud project, and disconnecting Unity Version Control.

@@ -61,6 +61,17 @@ final class AppModel {
     /// The open "Clean Up" sheet, if any.
     var cleanup: Cleanup?
 
+    // Unity Cloud
+    /// The open "Connect to Unity Cloud" sheet, if any.
+    var cloudConnect: CloudConnect?
+    /// Project waiting for the "Disconnect from Unity Cloud?" confirmation.
+    var projectPendingCloudDisconnect: Project?
+    /// The signed-in account's organizations, once loaded; names the organization a
+    /// project's settings refer to by id.
+    private(set) var cloudOrganizations: [CloudOrganization] = []
+    /// Projects being disconnected.
+    private(set) var disconnectingCloud: Set<String> = []
+
     // UniHub updates
     /// A newer UniHub release; its sheet shows while this is set.
     var availableUpdate: AppUpdate?
@@ -322,6 +333,133 @@ final class AppModel {
         }
         if detailsPath == path { reloadDetails() }  // the size on disk changed
         await refreshLocal()
+    }
+
+    // MARK: Unity Cloud
+
+    /// Opens the "Connect to Unity Cloud" sheet and lists the account's organizations.
+    func requestCloudConnect(for project: Project) {
+        cloudConnect = CloudConnect(project: project)
+        Task { await loadCloudOrganizations() }
+    }
+
+    func loadCloudOrganizations() async {
+        guard let unihub, let path = cloudConnect?.project.path else { return }
+        cloudConnect?.isLoadingOrganizations = true
+        cloudConnect?.error = nil
+        let result = await Task.detached { Result { try unihub.cloudOrganizations() } }.value
+        guard cloudConnect?.project.path == path else { return }  // closed or replaced meanwhile
+        cloudConnect?.isLoadingOrganizations = false
+        switch result {
+        case .success(let orgs):
+            cloudOrganizations = orgs
+            cloudConnect?.organizations = orgs
+            // Keep a still-valid choice, otherwise start with the first organization.
+            if let current = cloudConnect?.organizationId, orgs.contains(where: { $0.id == current }) {
+                await loadCloudProjects()
+            } else if let first = orgs.first {
+                await selectCloudOrganization(first.id)
+            }
+        case .failure(let error):
+            cloudConnect?.error = describe(error)
+        }
+    }
+
+    func selectCloudOrganization(_ id: String) async {
+        cloudConnect?.organizationId = id
+        cloudConnect?.selectedProjectId = nil
+        cloudConnect?.projects = []
+        await loadCloudProjects()
+    }
+
+    func loadCloudProjects() async {
+        guard let unihub, let path = cloudConnect?.project.path, let org = cloudConnect?.organizationId else { return }
+        cloudConnect?.isLoadingProjects = true
+        cloudConnect?.error = nil
+        let result = await Task.detached { Result { try unihub.cloudProjects(organization: org) } }.value
+        guard cloudConnect?.project.path == path, cloudConnect?.organizationId == org else { return }
+        cloudConnect?.isLoadingProjects = false
+        switch result {
+        case .success(let projects):
+            cloudConnect?.projects = projects
+            // Suggest the cloud project named like the local one, as most are.
+            if cloudConnect?.selectedProjectId == nil,
+               let title = cloudConnect?.project.title,
+               let match = projects.first(where: { $0.name.caseInsensitiveCompare(title) == .orderedSame }) {
+                cloudConnect?.selectedProjectId = match.id
+            }
+        case .failure(let error):
+            cloudConnect?.error = describe(error)
+        }
+    }
+
+    func connectCloud() async {
+        guard let unihub, let current = cloudConnect, let target = current.selectedProject else { return }
+        let path = current.project.path
+        cloudConnect?.isConnecting = true
+        cloudConnect?.error = nil
+        let result = await Task.detached {
+            Result { try unihub.connectCloudProject(path: path, cloudProject: target) }
+        }.value
+        guard cloudConnect?.project.path == path else { return }
+        cloudConnect?.isConnecting = false
+        switch result {
+        case .success:
+            cloudConnect = nil
+            await afterCloudChange(path: path)
+        case .failure(let error):
+            cloudConnect?.error = describe(error)
+        }
+    }
+
+    func requestCloudDisconnect(of project: Project) {
+        projectPendingCloudDisconnect = project
+    }
+
+    func disconnectCloud(_ project: Project) async {
+        let path = project.path
+        disconnectingCloud.insert(path)
+        _ = await perform { try $0.disconnectCloudProject(path: path) }
+        disconnectingCloud.remove(path)
+        await afterCloudChange(path: path)
+    }
+
+    private func afterCloudChange(path: String) async {
+        await refreshLocal()
+        if detailsPath == path { reloadDetails() }
+    }
+
+    /// The name of the organization a project's settings refer to, by its UUID, numeric id
+    /// or name, once the organizations are loaded.
+    func cloudOrganizationName(for stored: String?) -> String? {
+        guard let stored else { return nil }
+        return cloudOrganizations.first { $0.id == stored || $0.genesisId == stored || $0.name == stored }?.name
+    }
+
+    /// Loads the organizations in the background (for naming them in the details panel).
+    func loadCloudOrganizationNamesIfNeeded() async {
+        guard let unihub, cloudOrganizations.isEmpty, auth?.signedIn == true else { return }
+        if let orgs = try? await Task.detached(operation: { try unihub.cloudOrganizations() }).value {
+            cloudOrganizations = orgs
+        }
+    }
+
+    /// Unity Hub keeps its own copy of each project's connection while it runs.
+    var isUnityHubRunning: Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.unity3d.unityhub").isEmpty
+    }
+
+    /// Body of the "Disconnect from Unity Cloud?" confirmation.
+    func cloudDisconnectMessage(for project: Project) -> String {
+        var parts = ["The project stops using Unity Cloud services until you connect it again. The cloud project and its data stay on Unity Cloud."]
+        if project.sourceControl?.provider == .unityVersionControl {
+            parts.append("The Unity Version Control workspace is left as it is.")
+        }
+        if isUnityHubRunning {
+            // A running Hub saves the ids it holds back into its list (docs/hub-behavior.md §12).
+            parts.append("Unity Hub is open and keeps its own copy of the connection, so its list may still show this project as connected. Disconnect it there too to update the Hub’s list.")
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     func copyToPasteboard(_ text: String) {
@@ -793,6 +931,29 @@ struct Cleanup: Identifiable {
 
     var selectedBytes: UInt64 {
         plan?.items.filter { selected.contains($0.path) }.reduce(0) { $0 + $1.bytes } ?? 0
+    }
+}
+
+/// State of the "Connect to Unity Cloud" sheet for one project.
+struct CloudConnect: Identifiable {
+    let project: Project
+    var organizations: [CloudOrganization] = []
+    var organizationId: String?
+    var projects: [CloudProject] = []
+    var selectedProjectId: String?
+    var search = ""
+    var isLoadingOrganizations = false
+    var isLoadingProjects = false
+    var isConnecting = false
+    var error: String?
+
+    var id: String { project.path }
+
+    var selectedProject: CloudProject? { projects.first { $0.id == selectedProjectId } }
+
+    var visibleProjects: [CloudProject] {
+        let query = search.trimmingCharacters(in: .whitespaces)
+        return query.isEmpty ? projects : projects.filter { $0.name.localizedCaseInsensitiveContains(query) }
     }
 }
 

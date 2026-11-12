@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use unihub_core::{CleanMethod, JobState, ReleaseStream, UniHub, UniHubError};
+use unihub_core::{CleanMethod, CloudOrganization, JobState, ReleaseStream, UniHub, UniHubError};
 
 /// UniHub: manage Unity projects and editors from the terminal.
 #[derive(Parser)]
@@ -64,6 +64,27 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// List your Unity Cloud organizations, or with --org the cloud projects in one (uses
+    /// the Unity CLI).
+    Cloud {
+        /// Organization id, numeric id or name.
+        #[arg(long)]
+        org: Option<String>,
+    },
+    /// Connect a project to an existing Unity Cloud project, like the Hub's "Connect to
+    /// Unity Cloud". The project must be closed in Unity.
+    Connect {
+        project: String,
+        /// Cloud project id or exact name.
+        #[arg(long)]
+        cloud_project: String,
+        /// Organization id, numeric id or name (default: your only organization).
+        #[arg(long)]
+        org: Option<String>,
+    },
+    /// Disconnect a project from Unity Cloud (the cloud project itself stays). The project
+    /// must be closed in Unity.
+    Disconnect { project: String },
     /// Check GitHub for a newer UniHub; with --install, update the app.
     Update {
         /// Download, verify and install the update over the app.
@@ -212,7 +233,8 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
                 let vcs = p.source_control.as_ref().map_or(String::new(), |sc| {
                     format!("{} {}", sc.provider.display_name(), sc.branch.clone().unwrap_or_default())
                 });
-                println!("{star}{:<28} {:<13} {:<34} {}{mark}", p.title, version, vcs, p.path);
+                let cloud = if p.cloud.is_connected() { "☁" } else { " " };
+                println!("{star}{:<28} {:<13} {cloud} {:<34} {}{mark}", p.title, version, vcs, p.path);
             }
         }
         Cmd::Add { path } => {
@@ -284,8 +306,10 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
             show("Build target", d.build_target.clone());
             show("Scripting", Some(d.scripting_backends.join(", ")));
             show("Packages", Some(d.package_count.to_string()));
+            show("Unity Cloud", Some(if d.cloud_connected { "connected" } else { "not connected" }.into()));
             show("Organization", d.organization.clone());
             show("Cloud project", d.cloud_project_name.clone());
+            show("Cloud project id", d.cloud_project_id.clone());
             if let Some(sc) = &d.source_control {
                 show("Source control", Some(sc.provider.display_name().to_string()));
                 show("Repository", sc.owner.as_ref().zip(sc.repository.as_ref()).map(|(o, r)| format!("{o}/{r}")));
@@ -351,6 +375,40 @@ fn run(cli: Cli) -> Result<(), UniHubError> {
             for f in &result.failed {
                 eprintln!("could not remove {f}");
             }
+        }
+        Cmd::Cloud { org: None } => {
+            for o in unihub.cloud_organizations()? {
+                println!("{:<28} {:<38} {:<16} {}", o.name, o.id, o.genesis_id.unwrap_or_default(), o.role.unwrap_or_default());
+            }
+        }
+        Cmd::Cloud { org: Some(org) } => {
+            let org = resolve_organization(&unihub, Some(&org))?;
+            for p in unihub.cloud_projects(org.id)? {
+                println!("{:<32} {}", p.name, p.id);
+            }
+        }
+        Cmd::Connect { project, cloud_project, org } => {
+            let path = resolve_project(&unihub, &project)?;
+            let org = resolve_organization(&unihub, org.as_deref())?;
+            let projects = unihub.cloud_projects(org.id.clone())?;
+            let target = projects
+                .iter()
+                .find(|p| p.id.eq_ignore_ascii_case(&cloud_project))
+                .or_else(|| {
+                    let named: Vec<_> = projects.iter().filter(|p| p.name.eq_ignore_ascii_case(&cloud_project)).collect();
+                    if named.len() == 1 { named.first().copied() } else { None }
+                })
+                .cloned()
+                .ok_or_else(|| UniHubError::InvalidData {
+                    message: format!("no single cloud project {cloud_project:?} in {} (see `unihub cloud --org {}`)", org.name, org.id),
+                })?;
+            unihub.connect_cloud_project(path.clone(), target.clone())?;
+            println!("connected {path} to {} ({}) in {}", target.name, target.id, org.name);
+        }
+        Cmd::Disconnect { project } => {
+            let path = resolve_project(&unihub, &project)?;
+            unihub.disconnect_cloud_project(path.clone())?;
+            println!("disconnected {path} from Unity Cloud");
         }
         Cmd::Update { install, app } => match unihub.check_for_update()? {
             None => println!("UniHub {} is the latest version", unihub.app_version()),
@@ -561,6 +619,25 @@ fn pick_editor(unihub: &UniHub, version: Option<String>) -> Result<unihub_core::
         Some(v) => editors.into_iter().find(|e| e.version == v).ok_or(UniHubError::EditorNotInstalled { version: v }),
         None => editors.into_iter().next().ok_or(UniHubError::InvalidData { message: "no editor is installed".into() }),
     }
+}
+
+/// An organization by id, numeric id or name; the only one when `query` is `None`.
+fn resolve_organization(unihub: &UniHub, query: Option<&str>) -> Result<CloudOrganization, UniHubError> {
+    let orgs = unihub.cloud_organizations()?;
+    let found = match query {
+        Some(q) => orgs.into_iter().find(|o| {
+            o.id.eq_ignore_ascii_case(q) || o.genesis_id.as_deref() == Some(q) || o.name.eq_ignore_ascii_case(q)
+        }),
+        None if orgs.len() == 1 => orgs.into_iter().next(),
+        None => {
+            return Err(UniHubError::InvalidData {
+                message: format!("you belong to {} organizations; pick one with --org (see `unihub cloud`)", orgs.len()),
+            });
+        }
+    };
+    found.ok_or_else(|| UniHubError::InvalidData {
+        message: format!("no organization {:?} (see `unihub cloud`)", query.unwrap_or_default()),
+    })
 }
 
 /// Accepts a path or a project title.

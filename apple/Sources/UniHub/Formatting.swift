@@ -46,7 +46,16 @@ extension Project {
     var modifiedKey: Int64 { modifiedMs ?? 0 }
     var favoriteKey: Int { isFavorite ? 1 : 0 }
     var branchKey: String { sourceControl?.branch ?? "" }
+    var cloudKey: Int { cloud.isConnected ? 1 : 0 }
 }
+
+extension CloudLink {
+    /// Connected only when both ids are set, as in Unity Hub.
+    var isConnected: Bool { cloudProjectId != nil && organizationId != nil }
+}
+
+extension CloudOrganization: Identifiable {}
+extension CloudProject: Identifiable {}
 
 extension VcsProvider {
     var displayName: String {

@@ -10,6 +10,7 @@ struct ProjectsView: View {
     /// `-detailsProject <path>` on the command line overrides it.
     @AppStorage("detailsProject") private var savedDetailsPath = ""
     @State private var didOpenLaunchCleanup = false
+    @State private var didOpenLaunchCloudConnect = false
 
     private var removalTitle: String {
         let pending = model.projectsPendingRemoval
@@ -69,6 +70,11 @@ struct ProjectsView: View {
             }
             .width(min: 130, ideal: 190)
 
+            TableColumn("Cloud", value: \.cloudKey) { project in
+                CloudCell(project: project)
+            }
+            .width(min: 40, ideal: 48, max: 64)
+
             TableColumn("Modified", value: \.modifiedKey) { project in
                 Text(Format.relative(ms: project.modifiedMs)).foregroundStyle(.secondary)
             }
@@ -109,6 +115,12 @@ struct ProjectsView: View {
                let project = model.projects.first(where: { $0.path == path }) {
                 didOpenLaunchCleanup = true
                 model.requestCleanup(of: project)
+            }
+            // Development aid: `-cloudConnectProject <path>` opens Connect to Unity Cloud once.
+            if !didOpenLaunchCloudConnect, let path = UserDefaults.standard.string(forKey: "cloudConnectProject"),
+               let project = model.projects.first(where: { $0.path == path }) {
+                didOpenLaunchCloudConnect = true
+                model.requestCloudConnect(for: project)
             }
         }
         .onChange(of: model.showDetails) { _, open in
@@ -253,6 +265,23 @@ private struct SourceControlCell: View {
     }
 }
 
+/// Like the Hub's Cloud column: a cloud when the project is connected to Unity Cloud.
+private struct CloudCell: View {
+    let project: Project
+
+    var body: some View {
+        if project.cloud.isConnected {
+            Image(systemName: "icloud.fill")
+                .foregroundStyle(.tint)
+                .help(project.cloud.projectName.map { "Connected to Unity Cloud project \($0)" } ?? "Connected to Unity Cloud")
+                .accessibilityLabel("Connected to Unity Cloud")
+        } else {
+            Text("—").foregroundStyle(.tertiary)
+                .help("Not connected to Unity Cloud")
+        }
+    }
+}
+
 private struct DetailsButton: View {
     let model: AppModel
     let project: Project
@@ -298,6 +327,13 @@ private struct ProjectMenu: View {
             Task { await model.toggleFavorite(project) }
         }
         Divider()
+        if project.cloud.isConnected {
+            Button("Disconnect from Unity Cloud…") { model.requestCloudDisconnect(of: project) }
+                .disabled(!project.exists || model.disconnectingCloud.contains(project.path))
+        } else {
+            Button("Connect to Unity Cloud…") { model.requestCloudConnect(for: project) }
+                .disabled(!project.exists)
+        }
         Button("Clean Up…") { model.requestCleanup(of: project) }
             .disabled(!project.exists)
             .help("Free disk space: remove Library, Temp, Logs, generated .sln/.csproj files…")

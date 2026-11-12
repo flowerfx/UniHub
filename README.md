@@ -27,6 +27,13 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
   details panel: render pipeline, current platform, scripting backend, packages, size on
   disk by folder, last commit, uncommitted changes, ahead/behind, Unity Cloud project, and
   links to the repository, branch, pull/merge requests and commits.
+- **Unity Cloud:** connect a project to one of your organization's Unity Cloud projects, or
+  disconnect it, from the project's menu or its details panel, like the Hub's "Connect to
+  Unity Cloud". The Cloud column shows which projects are connected. UniHub saves the cloud
+  project in `ProjectSettings/ProjectSettings.asset` exactly as the Hub does (refused while
+  the project is open in Unity); listing organizations and cloud projects needs the Unity CLI
+  and sign-in. Creating a cloud project is left to the
+  [Unity Dashboard](https://cloud.unity.com).
 - **Clean Up:** free disk space from a project's menu or its details panel. In a git
   repository it offers the untracked files git ignores (never tracked or new uncommitted
   files); without git, only what Unity and IDEs regenerate: `Library`, `Temp`, `obj`,
@@ -62,8 +69,8 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
   replaces itself. Turn the daily check off in Settings → Advanced.
 - **CLI:** `unihub projects | templates | new | editors | releases | install | uninstall |
   modules | module-add | module-remove | open | add | remove | import | info | clean |
-  account | login | logout | tools | tool-install | tool-remove | cli | cli-install |
-  settings | update`.
+  cloud | connect | disconnect | account | login | logout | tools | tool-install |
+  tool-remove | cli | cli-install | settings | update`.
 
 ### How sign-in and installs work
 
@@ -146,6 +153,7 @@ Launch arguments are handy while working on the UI:
 dist/UniHub.app/Contents/MacOS/UniHub -page Tools -openSettings YES -settingsPane Licenses
 dist/UniHub.app/Contents/MacOS/UniHub -detailsProject /path/to/project
 dist/UniHub.app/Contents/MacOS/UniHub -cleanupProject /path/to/project
+dist/UniHub.app/Contents/MacOS/UniHub -cloudConnectProject /path/to/project
 dist/UniHub.app/Contents/MacOS/UniHub -newProject YES
 ```
 
@@ -157,6 +165,10 @@ android android-sdk-ndk-tools --accept-terms` installs with progress; `unihub mo
 first use); `unihub new "My Game" --path ~/Projects --template com.unity.template.urp-blank`
 creates a project and opens it in Unity (defaults: the newest editor, the default project
 location, the first template on disk).
+
+`unihub cloud` lists your Unity Cloud organizations and `unihub cloud --org <org>` their cloud
+projects; `unihub connect <project> --cloud-project <id or name> [--org <org>]` and
+`unihub disconnect <project>` change a project's connection.
 
 `unihub clean <project>` lists what Clean Up would remove; add `--yes` to delete it, and
 `--all` to include ignored files that are not regenerated.
@@ -174,6 +186,7 @@ crates/unihub-core     Rust core, exported to Swift with UniFFI
   vcs.rs               Git / GitHub / GitLab / Unity Version Control / Perforce detection
   details.rs           project details panel and size on disk
   clean.rs             Clean Up: git-ignored or generated files, open-in-Unity check
+  cloud.rs             Unity Cloud: connect / disconnect a project, list organizations and projects
   modules.rs           installed editors' modules (modules.json, or a folder scan)
   jobs.rs              background jobs with progress: installs through the Unity CLI, new projects
   updates.rs           UniHub's own updates from GitHub releases

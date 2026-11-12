@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::cloud;
 use crate::unity_cli;
 use crate::vcs::{self, GitStatus, SourceControl, VcsProvider};
 
@@ -27,9 +28,13 @@ pub struct ProjectDetails {
     /// e.g. `Android: IL2CPP`. Needs the Unity CLI.
     pub scripting_backends: Vec<String>,
     pub package_count: u32,
+    /// Unity Cloud project, from `ProjectSettings.asset` (see `cloud`).
     pub cloud_project_id: Option<String>,
     pub cloud_project_name: Option<String>,
+    /// The organization as stored there: numeric id, UUID or name.
     pub organization: Option<String>,
+    /// Both the cloud project and organization ids are set, as Unity Hub decides it.
+    pub cloud_connected: bool,
     pub source_control: Option<SourceControl>,
     pub git: Option<GitStatus>,
     /// True when the Unity CLI added to these details.
@@ -55,6 +60,7 @@ pub fn load(project: &Path, cli: Option<&Path>) -> ProjectDetails {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok());
     let source_control = vcs::detect(project);
+    let cloud = cloud::parse_link(&settings);
     let git = source_control
         .as_ref()
         .filter(|sc| !matches!(sc.provider, VcsProvider::UnityVersionControl | VcsProvider::Perforce))
@@ -72,9 +78,10 @@ pub fn load(project: &Path, cli: Option<&Path>) -> ProjectDetails {
             .as_ref()
             .and_then(|m| m.get("dependencies")?.as_object().map(|d| d.len() as u32))
             .unwrap_or(0),
-        cloud_project_id: yaml_value(&settings, "cloudProjectId"),
-        cloud_project_name: yaml_value(&settings, "projectName"),
-        organization: yaml_value(&settings, "organizationId"),
+        cloud_connected: cloud.is_connected(),
+        cloud_project_id: cloud.cloud_project_id,
+        cloud_project_name: cloud.project_name,
+        organization: cloud.organization_id,
         source_control,
         git,
         from_unity_cli: false,
@@ -100,9 +107,9 @@ fn merge_cli_info(details: &mut ProjectDetails, info: &Value) {
     if let Some(n) = info.get("packages").and_then(Value::as_object).map(|p| p.len() as u32) {
         details.package_count = n;
     }
-    details.organization = s("organizationName").or(details.organization.take());
-    details.cloud_project_name = s("projectName").or(details.cloud_project_name.take());
-    details.cloud_project_id = s("cloudProjectId").or(details.cloud_project_id.take());
+    // Cloud fields stay as read from the file: the CLI reports Unity Hub's cached ids,
+    // which the Hub keeps after the file is unlinked, and its `organizationName` is the
+    // source control organization, not the Unity one.
 }
 
 fn normalize_pipeline(value: &str) -> String {
@@ -238,6 +245,8 @@ mod tests {
         assert_eq!(d.product_name.as_deref(), Some("Puzzle"));
         assert_eq!(d.version.as_deref(), Some("2.2.7"));
         assert_eq!(d.cloud_project_id.as_deref(), Some("abc-123"));
+        assert_eq!(d.organization.as_deref(), Some("studio-org"));
+        assert!(d.cloud_connected);
         assert_eq!(d.render_pipeline.as_deref(), Some("URP"));
         assert_eq!(d.package_count, 2);
         assert!(!d.from_unity_cli);
@@ -255,13 +264,14 @@ mod tests {
                 "buildTarget": "iOS", "renderPipeline": "URP",
                 "scriptingBackend": { "Android": "IL2CPP" },
                 "packages": { "a": "1", "b": "2", "c": "3" },
-                "organizationName": "Kuruby"
+                "organizationName": "github-owner", "cloudProjectId": "cached-by-the-hub"
             }),
         );
         assert_eq!(d.build_target.as_deref(), Some("iOS"));
         assert_eq!(d.scripting_backends, vec!["Android: IL2CPP".to_string()]);
         assert_eq!(d.package_count, 3);
-        assert_eq!(d.organization.as_deref(), Some("Kuruby"));
+        assert_eq!(d.organization, None);
+        assert_eq!(d.cloud_project_id, None);
         assert!(d.from_unity_cli);
     }
 

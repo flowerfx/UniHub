@@ -50,6 +50,19 @@ struct ContentView: View {
         // Lets the Dock icon reopen this window after it was closed.
         .onAppear { MainWindow.openAction = openWindow }
         .sheet(item: $model.cleanup) { _ in CleanupView(model: model) }
+        .sheet(item: $model.cloudConnect) { _ in CloudConnectSheet(model: model) }
+        .confirmationDialog(
+            "Disconnect “\(model.projectPendingCloudDisconnect?.title ?? "")” from Unity Cloud?",
+            isPresented: Binding(
+                get: { model.projectPendingCloudDisconnect != nil },
+                set: { if !$0 { model.projectPendingCloudDisconnect = nil } }
+            ),
+            presenting: model.projectPendingCloudDisconnect
+        ) { project in
+            Button("Disconnect", role: .destructive) { Task { await model.disconnectCloud(project) } }
+        } message: { project in
+            Text(model.cloudDisconnectMessage(for: project))
+        }
         .sheet(isPresented: $model.isCreatingProject) { NewProjectSheet(model: model) }
         .sheet(item: $model.availableUpdate) { update in UpdateSheet(model: model, update: update) }
         .alert(

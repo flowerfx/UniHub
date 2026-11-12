@@ -9,6 +9,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cloud::{self, CloudLink};
 use crate::error::{Result, UniHubError};
 use crate::paths::path_string;
 use crate::vcs::{self, SourceControl};
@@ -34,6 +35,8 @@ pub struct Project {
     pub access_denied: bool,
     /// Git (GitHub, GitLab, other hosts), Unity Version Control or Perforce, if used.
     pub source_control: Option<SourceControl>,
+    /// The Unity Cloud project it is connected to, from `ProjectSettings.asset`.
+    pub cloud: CloudLink,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -192,6 +195,7 @@ fn build_project(path: &str, stored: &StoredProject) -> Project {
         exists: is_unity_project(dir),
         access_denied: access_denied(dir),
         source_control: vcs::detect(dir),
+        cloud: cloud::read_link(dir),
     }
 }
 

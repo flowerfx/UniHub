@@ -19,8 +19,8 @@ struct ProjectDetailsView: View {
                     ProjectSection(model: model, project: project, details: model.details)
                     SizeSection(model: model, project: project)
                     SourceControlSection(model: model, project: project, details: model.details)
-                    if let details = model.details, details.cloudProjectId != nil || details.organization != nil {
-                        CloudSection(model: model, details: details)
+                    if project.exists && !project.accessDenied {
+                        CloudSection(model: model, project: project)
                     }
                     if let details = model.details, !details.fromUnityCli {
                         Section {
@@ -278,24 +278,67 @@ private struct SourceControlSection: View {
     }
 }
 
+/// Connection to a Unity Cloud project, read from the project's settings, with Connect
+/// and Disconnect like the Hub's project details.
 private struct CloudSection: View {
     let model: AppModel
-    let details: ProjectDetails
+    let project: Project
 
     var body: some View {
-        Section("Unity Cloud") {
-            Row("Organization", details.organization)
-            Row("Cloud project", details.cloudProjectName)
-            if let id = details.cloudProjectId {
-                LabeledContent("Project ID") {
-                    HStack(spacing: 4) {
-                        Text(id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
-                        Button("Copy", systemImage: "doc.on.doc") { model.copyToPasteboard(id) }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.borderless)
-                    }
+        let cloud = project.cloud
+        let busy = model.disconnectingCloud.contains(project.path)
+        Section {
+            LabeledContent("Status") {
+                if busy {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Disconnecting…") }
+                } else if cloud.isConnected {
+                    Label("Connected", systemImage: "checkmark.icloud.fill").foregroundStyle(.green)
+                } else {
+                    Label("Not connected", systemImage: "icloud.slash").foregroundStyle(.secondary)
                 }
             }
+            if cloud.isConnected {
+                LabeledContent("Organization") {
+                    let stored = cloud.organizationId ?? ""
+                    Text(model.cloudOrganizationName(for: stored) ?? stored)
+                        .textSelection(.enabled)
+                        .help("Stored as \(stored)")
+                }
+                Row("Cloud project", cloud.projectName)
+                if let id = cloud.cloudProjectId {
+                    LabeledContent("Project ID") {
+                        HStack(spacing: 4) {
+                            Text(id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
+                            Button("Copy", systemImage: "doc.on.doc") { model.copyToPasteboard(id) }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            } else {
+                Text("Connect the project to a Unity Cloud project to use Build Automation, Analytics, Version Control and other services.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            HStack {
+                Text("Unity Cloud")
+                Spacer()
+                if cloud.isConnected {
+                    Button("Disconnect…") { model.requestCloudDisconnect(of: project) }
+                        .controlSize(.small)
+                        .disabled(busy)
+                        .help("Stop using Unity Cloud services in this project")
+                } else {
+                    Button("Connect…") { model.requestCloudConnect(for: project) }
+                        .controlSize(.small)
+                        .help("Connect this project to a Unity Cloud project")
+                }
+            }
+        }
+        .task(id: cloud.organizationId) {
+            if cloud.isConnected { await model.loadCloudOrganizationNamesIfNeeded() }
         }
     }
 }
