@@ -9,6 +9,12 @@ account and tools) in a ~5 MB app instead of a ~200 MB Electron one.
 > UniHub is an independent project. It is not affiliated with or endorsed by Unity
 > Technologies. "Unity" and "Unity Hub" are trademarks of Unity Technologies.
 
+<p align="center"><img src="docs/screenshots/projects.png" alt="UniHub's project list: editor version, source control, Unity Cloud and last change of each project, with the details panel of one project"></p>
+<p align="center">
+  <img src="docs/screenshots/installs.png" width="49%" alt="Installed Unity editors with their platforms and how many projects use each">
+  <img src="docs/screenshots/releases.png" width="49%" alt="Unity releases by stream, ready to install">
+</p>
+
 ## Features
 
 - **Projects:** your projects with editor version and last-modified time. Search,
